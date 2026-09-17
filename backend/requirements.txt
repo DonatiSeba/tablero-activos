@@ -1,0 +1,12 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+# SQLAlchemy 2.0.36 does not support Python 3.14's typing internals.
+SQLAlchemy==2.0.36; python_version < "3.14"
+SQLAlchemy>=2.0.37,<2.1; python_version >= "3.14"
+alembic==1.14.0
+# Keep the Docker runtime pinned while allowing Python 3.14 test environments to
+# install a psycopg binary wheel that supports that interpreter.
+psycopg[binary]==3.2.3; python_version < "3.14"
+psycopg[binary]>=3.2.10,<3.4; python_version >= "3.14"
+argon2-cffi==23.1.0
+itsdangerous==2.2.0

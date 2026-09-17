@@ -1,0 +1,22 @@
+# Local Pi runtime state
+.atl/
+
+# Local configuration and secrets
+.env
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# JavaScript artifacts
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Editor and operating system artifacts
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

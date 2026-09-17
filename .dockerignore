@@ -1,0 +1,37 @@
+# Version control and local configuration
+.git/
+.env
+.env.*
+!.env.example
+
+# Local dependency environments
+**/node_modules/
+.venv/
+venv/
+env/
+**/.venv/
+
+# Generated builds and test/cache outputs
+**/dist/
+**/build/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+*.tsbuildinfo
+
+# Editor, operating-system, and local runtime artifacts
+.atl/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Unused by the Nginx repository-root build context
+backend/
+odd/
