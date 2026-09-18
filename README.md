@@ -151,6 +151,49 @@ curl -X POST http://localhost:8080/api/imports/audit \
   -F cost_center_code=190
 ```
 
+## Dashboard and operational read API
+
+All of the following read-only endpoints require an authenticated `VIEWER`,
+`EDITOR`, or `ADMIN` session. They are server-calculated presentation contracts:
+the browser must not recalculate matching, reconciliation, or KPIs from source
+records. Responses never contain workbook bytes, storage paths, SHA-256 values,
+source-row JSON, raw notes, session data, or audit-log data.
+
+- `GET /api/dashboard/summaries?cost_center_code=&limit=100&offset=0` returns
+  bounded per-cost-center summaries. For each source it selects a completed batch
+  by greatest `report_date`, then greatest batch UUID solely as a deterministic
+  selection tie-breaker (not as chronology). `latest_sources` reports each
+  independently selected batch ID and date. `freshness.warning` is true whenever
+  either source is unavailable or dates differ; differing dates explicitly do
+  not represent one shared cutoff.
+- Summary `metrics.current_system_distinct_asset_count` is the distinct non-null
+  asset IDs in the selected system batch. `found_count`, `returned_count`, and
+  `review_required_count` are distinct assets in that system scope with an audit
+  current-state projection whose provenance is the selected audit batch.
+  `unresolved_audit_case_count` is the unresolved reconciliation-case count in
+  that selected audit batch. `pending_not_accounted_count` is current-system
+  assets not found or returned; review-required assets remain pending/not
+  accounted. Metrics needing unavailable system or audit evidence are `null`.
+- `GET /api/dashboard/system-drilldown?cost_center_code=190&limit=100&offset=0`
+  returns the selected system snapshot grouped as `Rubro → Categoría → Producto`,
+  with server-owned observation, distinct-asset, and reported-status counts.
+  Pagination is over deterministic leaf product groups ordered by rubro, category,
+  then product (case-insensitive, with missing labels first); parent groups contain
+  only leaves from the requested page. `limit` is 1–100 and `offset` is bounded at
+  10,000. `page` gives `has_more` and the total leaf-group count. It returns a
+  stable, safe empty `groups` list and zero-count page when no system evidence
+  exists.
+- `GET /api/operations/import-history?source=&cost_center_code=&status=&limit=50&offset=0`
+  returns safe batch metadata and sanitized warning/processing counts. Ordering
+  is `imported_at` descending then batch UUID descending. `limit` is 1–100 and
+  `offset` is bounded at 10,000; `page` gives `has_more` and `total_count`.
+- `GET /api/operations/review-queue?cost_center_code=&category=&limit=50&offset=0`
+  returns paginated unresolved identifier cases and `review_required_return`
+  audit-current projections. `queue_counts` is server-calculated. Return-review
+  items state that column-L RETURNED is an authorized post-audit inference, not
+  a warehouse receipt. This work unit intentionally exposes no resolution
+  command.
+
 ## Start and stop
 
 Build and start the complete stack:

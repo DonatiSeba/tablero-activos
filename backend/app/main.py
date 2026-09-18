@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from .auth import router as auth_router
 from .auth import validate_session_configuration
 from .current_states import router as current_states_router
+from .dashboard import router as dashboard_router
 from .imports import router as imports_router
 from .request_limits import ImportBodyLimitMiddleware
 
@@ -26,6 +27,7 @@ app.add_middleware(ImportBodyLimitMiddleware)
 app.include_router(auth_router)
 app.include_router(imports_router)
 app.include_router(current_states_router)
+app.include_router(dashboard_router)
 
 
 @app.get("/health", tags=["system"])
