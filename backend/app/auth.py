@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .db import get_db
+from .db import _configured_value, get_db
 from .models import AuditLog, User, UserRole, UserSession
 
 SESSION_COOKIE_NAME = "asset_session"
@@ -46,7 +46,7 @@ def _environment() -> str:
 
 
 def _session_secret() -> str:
-    secret = os.environ.get("SESSION_SECRET", "")
+    secret = _configured_value("SESSION_SECRET") or ""
     if len(secret) < 32:
         raise RuntimeError("SESSION_SECRET must contain at least 32 characters")
     return secret

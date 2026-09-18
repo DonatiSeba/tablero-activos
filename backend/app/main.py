@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from .auth import router as auth_router
 from .auth import validate_session_configuration
@@ -9,6 +10,7 @@ from .current_states import router as current_states_router
 from .dashboard import router as dashboard_router
 from .imports import router as imports_router
 from .request_limits import ImportBodyLimitMiddleware
+from .readiness import is_ready
 
 
 @asynccontextmanager
@@ -33,5 +35,14 @@ app.include_router(dashboard_router)
 @app.get("/health", tags=["system"])
 @app.get("/api/health", tags=["system"])
 def health() -> dict[str, str]:
-    """Report whether this API process is ready to receive requests."""
+    """Report process liveness only; dependency readiness is exposed separately."""
     return {"status": "ok"}
+
+
+@app.get("/ready", tags=["system"])
+@app.get("/api/ready", tags=["system"])
+def ready() -> dict[str, str]:
+    """Report dependency readiness without disclosing failing infrastructure details."""
+    if is_ready():
+        return {"status": "ok"}
+    return JSONResponse(status_code=503, content={"status": "unavailable"})

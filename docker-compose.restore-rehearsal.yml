@@ -1,0 +1,23 @@
+# Isolated restore rehearsal override. Use only with RESTORE_REHEARSAL=1.
+name: activos-restore-rehearsal
+
+services:
+  # Service mount targets remain the base Compose names; these top-level
+  # definitions substitute isolated backing volumes without a tagged merge.
+  postgres: {}
+
+  backend: {}
+
+  nginx:
+    # A restore rehearsal must never join Traefik or expose a public router.
+    ports: !reset []
+    networks:
+      - app_internal
+    labels: !reset {}
+    profiles: ["public"]
+
+volumes:
+  postgres_data:
+    name: activos_restore_rehearsal_postgres_data
+  import_data:
+    name: activos_restore_rehearsal_import_data

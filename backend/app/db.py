@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Generator
+from pathlib import Path
 from functools import lru_cache
 
 from sqlalchemy import MetaData, create_engine
@@ -24,8 +25,22 @@ class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
+def _configured_value(name: str) -> str | None:
+    """Read a direct setting or a newline-terminated Compose secret file."""
+    value = os.environ.get(name)
+    file_name = os.environ.get(f"{name}_FILE")
+    if value and file_name:
+        raise RuntimeError(f"only one of {name} or {name}_FILE may be configured")
+    if file_name:
+        try:
+            return Path(file_name).read_text(encoding="utf-8").rstrip("\r\n")
+        except OSError as error:
+            raise RuntimeError(f"{name}_FILE could not be read") from error
+    return value
+
+
 def _database_url() -> str:
-    url = os.environ.get("DATABASE_URL")
+    url = _configured_value("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL must be configured before database-backed endpoints are used")
     if url.startswith("postgresql://"):
@@ -35,7 +50,11 @@ def _database_url() -> str:
 
 @lru_cache
 def _session_factory() -> sessionmaker[Session]:
-    return sessionmaker(bind=create_engine(_database_url(), pool_pre_ping=True), autoflush=False, expire_on_commit=False)
+    url = _database_url()
+    options: dict[str, object] = {"pool_pre_ping": True, "pool_timeout": 5}
+    if url.startswith("postgresql"):
+        options["connect_args"] = {"connect_timeout": 5}
+    return sessionmaker(bind=create_engine(url, **options), autoflush=False, expire_on_commit=False)
 
 
 def get_db() -> Generator[Session, None, None]:

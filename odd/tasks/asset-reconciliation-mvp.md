@@ -80,12 +80,12 @@ System, physical-audit, and warehouse-return reports are independent and may dis
   - [x] AR-07B Deliver React executive and operational views.
     - Outcome: directors view server-calculated KPIs, freshness, grouped drill-down, import history, and queues; editors use authorized import controls. The browser presents server data and never calculates reconciliation/matching/business states.
     - Checks: frontend component tests; production build; API-contract checks; responsive smoke test.
-    - Evidence: completed 2026-09-21. Vitest/RTL covers session, role affordances, freshness, error state, and multipart upload behavior; frontend build and 64 backend regression tests passed.
+    - Evidence: completed and committed 2026-09-21 as `5406b1c` (`feat: deliver executive and operational views`). Vitest/RTL covers session, role affordances, freshness, error state, and multipart upload behavior; frontend build and 64 backend regression tests passed.
 
-- [ ] AR-08 Prepare operational deployment and automation handoff.
+- [x] AR-08 Prepare operational deployment and automation handoff.
   - Outcome: production configuration, backups, health checks, import endpoint documentation, and SharePoint/n8n integration contract are ready without coupling the MVP to automation.
-  - Checks: Compose production configuration review; documented restore rehearsal; endpoint contract review.
-  - Evidence: pending.
+  - Checks: backend readiness/static production contract tests; offline Alembic SQL; frontend build; whitespace check. Docker Compose/live VPS checks remain manual because Docker is unavailable locally.
+  - Evidence: completed 2026-09-21; no deployment, n8n modification, real secret, or PR was created. Static checks pass; Docker Compose rendering and live VPS validation remain a required pre-deployment gate.
 
 ## Progress
 - 2026-09-17: Repository branch created and existing system report profiled. No application code exists yet.
@@ -115,9 +115,10 @@ System, physical-audit, and warehouse-return reports are independent and may dis
 - 2026-09-21: AR-07A added viewer-only, bounded server read contracts for independently selected source batches, freshness, grouped system snapshot status counts, sanitized import history, and review queues. Backend tests, offline PostgreSQL SQL, frontend build, and whitespace checks passed; Docker Compose remains unavailable because Docker is absent.
 - 2026-09-21: AR-07A correction paginates the deterministic server-owned Rubro/Categoría/Producto leaf order before constructing the returned hierarchy; every response, including an empty one, now includes bounded page metadata and high-cardinality boundary coverage.
 - 2026-09-21: AR-07B added cookie-session React views for dashboard summaries and drill-down, operations, current states, and editor uploads. The UI renders server contracts directly, displays source freshness and the column-L inference limitation, and exposes no match-resolution command or credential storage. Vitest/RTL, production build, backend regression tests, and whitespace checks passed.
+- 2026-09-21: AR-08 added the isolated `activos` production Compose override, Traefik HTTPS labels, Compose-secret file contract, serialized migration operation, detail-free readiness probe, paired backup/restore scripts, and deployment/automation handoffs. No remote action or n8n change occurred; Docker/VPS validation remains a manual production prerequisite.
 
 ## Next step
-Prepare the AR-08 operational deployment and automation handoff.
+Run the documented one-time VPS preflight and first release with an approved operator, including a restore rehearsal before relying on scheduled backups.
 
 ## Key Learnings
 Recognized column-L markers are post-audit return annotations by explicit user authorization, not independently timestamped events. The audit workbook provides no destination, receipt record, or event time, so the projection records only the authorized inference and source-observation provenance. Same-date marker rank (recognized return > ambiguous > unmarked) is an approved deterministic interpretation rather than measured chronology. A later ambiguous marker is a review-required current projection and is not counted as found or returned. The supplied workbook stores accented marker variants with U+00D3, while the legacy U+FFFD renderings are retained as exact compatibility spellings without normalization. Dashboard source selection uses report date and a UUID only as a deterministic tie-breaker, never as evidence of event chronology.

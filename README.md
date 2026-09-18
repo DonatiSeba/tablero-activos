@@ -275,6 +275,19 @@ Validate the resolved Compose configuration before startup:
 docker compose config
 ```
 
+## Production operations
+
+Production deployment is intentionally separate from local Compose. Use
+`docker-compose.production.yml` only with the documented production environment
+file and existing Traefik network; it adds no Nginx host port and keeps FastAPI
+and PostgreSQL private. The one-shot migration service is run by the release
+operator before web startup, while `/health` remains liveness and `/ready`
+checks database schema and evidence storage readiness.
+
+- [Hostinger VPS deployment and rollback](docs/production-deployment.md)
+- [Matched PostgreSQL/evidence backup, restore, and verification](docs/backup-restore.md)
+- [n8n/SharePoint external automation handoff](docs/n8n-sharepoint-handoff.md)
+
 ## Container build notes
 
 The Nginx image uses the multi-stage `frontend/Dockerfile`: Node builds the
