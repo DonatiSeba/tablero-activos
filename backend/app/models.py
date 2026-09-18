@@ -80,6 +80,20 @@ class AuditMatchReason(str, enum.Enum):
     AMBIGUOUS_NORMALIZED_CANDIDATE = "ambiguous_normalized_candidate"
 
 
+class AuditReturnMarkerCategory(str, enum.Enum):
+    """Interpretation of the immutable blank-header audit column L value."""
+
+    RECOGNIZED_RETURN = "recognized_return"
+    AMBIGUOUS_RETURN = "ambiguous_return"
+    UNMARKED_UNKNOWN = "unmarked_unknown"
+
+
+class AuditCurrentState(str, enum.Enum):
+    FOUND = "found"
+    RETURNED = "returned"
+    REVIEW_REQUIRED = "review_required"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -293,6 +307,55 @@ class ReconciliationCase(Base):
         persisted_enum(AuditMatchReason, name="audit_match_reason"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class AuditCurrentStateProjection(Base):
+    """Reproducible current audit state; it never changes the source evidence.
+
+    Version ``audit_l_return_v1`` implements the user's authorized assumption
+    that a recognized column-L return marker occurred after its audit snapshot.
+    """
+
+    __tablename__ = "audit_current_state_projections"
+    __table_args__ = (
+        UniqueConstraint("asset_id", "cost_center_id", name="audit_current_state_per_asset_cost_center"),
+        CheckConstraint("marker_column = 12", name="audit_current_state_marker_column_l"),
+        CheckConstraint(
+            "(state = 'returned' AND marker_category = 'recognized_return') "
+            "OR (state = 'review_required' AND marker_category = 'ambiguous_return') "
+            "OR (state = 'found' AND marker_category = 'unmarked_unknown')",
+            name="audit_current_state_matches_marker_category",
+        ),
+        CheckConstraint("length(projection_version) > 0", name="audit_current_state_projection_version_not_empty"),
+        CheckConstraint("length(reason) > 0", name="audit_current_state_reason_not_empty"),
+        Index("ix_audit_current_state_projections_cost_center_id", "cost_center_id"),
+        Index("ix_audit_current_state_projections_state", "state"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    asset_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("assets.id", ondelete="RESTRICT"), nullable=False)
+    cost_center_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("cost_centers.id", ondelete="RESTRICT"), nullable=False
+    )
+    audit_observation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("asset_observations.id", ondelete="RESTRICT"), nullable=False
+    )
+    state: Mapped[AuditCurrentState] = mapped_column(
+        persisted_enum(AuditCurrentState, name="audit_current_state"), nullable=False
+    )
+    marker_category: Mapped[AuditReturnMarkerCategory] = mapped_column(
+        persisted_enum(AuditReturnMarkerCategory, name="audit_return_marker_category"), nullable=False
+    )
+    # A scalar copy supports a minimal read API; the authoritative typed raw
+    # cell and its sheet/row provenance remain in AssetObservation.original_data.
+    marker_raw_value: Mapped[Any | None] = mapped_column(JSON_DOCUMENT, nullable=True)
+    marker_column: Mapped[int] = mapped_column(nullable=False, default=12, server_default=text("12"))
+    reason: Mapped[str] = mapped_column(String(128), nullable=False)
+    projection_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 
 
 class ReconciliationResult(Base):

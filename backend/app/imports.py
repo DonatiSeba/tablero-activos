@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from .audit_current_states import rebuild_audit_current_state_projections
 from .audit_imports import match_audit_identifier, parse_audit_report
 from .auth import require_editor, write_audit_log
 from .db import get_db
@@ -318,6 +319,7 @@ def import_audit_report(
             for reason in AuditMatchReason
             if counts[reason.value]
         ]
+        current_state_counts = rebuild_audit_current_state_projections(db)
         write_audit_log(
             db,
             request,
@@ -325,7 +327,7 @@ def import_audit_report(
             target_entity="import_batch",
             target_id=batch.id,
             user_id=user.id,
-            details={"row_count": len(report.rows), "match_counts": counts},
+            details={"row_count": len(report.rows), "match_counts": counts, "current_state_counts": current_state_counts},
         )
         db.commit()
     except IntegrityError:
@@ -349,5 +351,6 @@ def import_audit_report(
         "cost_center": {"code": cost_center.code, "name": cost_center.name},
         "row_count": batch.row_count,
         "match_counts": counts,
+        "current_state_counts": current_state_counts,
         "warnings": warnings,
     }

@@ -137,6 +137,10 @@ aliases from audit inputs. Cases are separate from `ReconciliationResult`, so
 unresolved evidence never fabricates an asset identity. The response exposes
 only aggregate match counts and warnings.
 
+The workbook's blank-header column L is retained as positional raw evidence (`column: 12`). Exact raw `VOLVI�`, `DEVOLVIO`, and `DEVOLVI�` markers have the user-authorized interpretation of a return **after** that audit snapshot (the supplied workbook stores the accented variants as `VOLVIÓ` and `DEVOLVIÓ`; both spellings are recognized without changing raw evidence). After every accepted audit import, a transactionally rebuilt `audit_l_return_v1` projection creates one current state per resolved asset and cost center: recognized markers produce `returned`; unmarked/unknown L values produce `found`; and `VOLVI� 4` (and workbook raw `VOLVIÓ 4`) produces `review_required` with its raw marker and source observation provenance. Review-required projections are not found, returned, or accounted buckets, and no immutable evidence is changed. Unresolved identifiers never project a state. Across report dates the later date wins. On the same report date, recognized return dominates ambiguous marker, which dominates ordinary unmarked presence; this is the authorized marker interpretation, not measured event time. A stable observation identifier only chooses provenance among otherwise equal rows, never event time. No return import, return observation, destination, or receipt timestamp is fabricated.
+
+Authenticated viewers (and therefore editors/administrators) can read `GET /api/current-states` with an optional `cost_center_code`. It returns the derived state, reason, projection version, raw L marker copy, and source audit observation ID, but not the full source row.
+
 Example after authenticating with the session cookie:
 
 ```sh
@@ -202,7 +206,7 @@ python -m alembic -c backend/alembic.ini upgrade head
 ```
 
 The migrations create the users, cost centers, assets and aliases, immutable
-import-batch evidence, observations, derived audit reconciliation cases,
+import-batch evidence, observations, derived audit reconciliation cases, derived audit current-state projections,
 reconciliation results, and audit-log tables. It uses PostgreSQL UUID, JSONB, INET, and enum types while
 retaining SQLite compatibility for isolated migration tests.
 

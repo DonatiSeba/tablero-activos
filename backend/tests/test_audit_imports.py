@@ -20,6 +20,8 @@ from backend.app.models import (
     Asset,
     AssetAlias,
     AssetObservation,
+    AuditCurrentState,
+    AuditCurrentStateProjection,
     AuditMatchReason,
     AuditMatchStrategy,
     CostCenter,
@@ -171,8 +173,8 @@ def test_editor_audit_import_creates_one_case_per_row_without_source_mutation(da
         db.commit()
     content = workbook_bytes(
         {"Physical": [
-            [2, "EXACT", "machine", "brand", "model", "works", "good", "secret note", "yes", "190", "190", None],
-            [1, " Norm Code ", "machine", "brand", "model", "fails", "bad", "secret note", "yes", "190", "190", None],
+            [2, "EXACT", "machine", "brand", "model", "works", "good", "secret note", "yes", "190", "190", "DEVOLVIO"],
+            [1, " Norm Code ", "machine", "brand", "model", "fails", "bad", "secret note", "yes", "190", "190", "VOLVI� 4"],
             [1, "DUP CODE", "machine", "brand", "model", "works", "good", "secret note", "yes", "190", "190", None],
             [1, None, "machine", "brand", "model", "works", "good", "secret note", "yes", "190", "190", None],
         ]},
@@ -195,6 +197,7 @@ def test_editor_audit_import_creates_one_case_per_row_without_source_mutation(da
         "exact_original_code": 1, "normalized_code": 1, "missing_identifier": 1,
         "no_normalized_candidate": 0, "ambiguous_normalized_candidate": 1,
     }
+    assert response.json()["current_state_counts"] == {"found": 0, "returned": 1, "review_required": 1}
     assert "secret note" not in response.text
     with database() as db:
         observations = list(db.scalars(select(AssetObservation).where(AssetObservation.source == "audit")))
@@ -209,7 +212,34 @@ def test_editor_audit_import_creates_one_case_per_row_without_source_mutation(da
         ]
         assert observations[0].quantity == 2
         assert observations[0].original_data["cells"][7]["value"] == "secret note"
+        assert observations[0].original_data["cells"][11]["value"] == "DEVOLVIO"
+        projections = list(db.scalars(select(AuditCurrentStateProjection)))
+        assert len(projections) == 2
+        exact_projection = next(projection for projection in projections if projection.marker_raw_value == "DEVOLVIO")
+        assert exact_projection.state is AuditCurrentState.RETURNED
+        assert exact_projection.audit_observation_id == observations[0].id
         assert (tmp_path / "imports" / batch.storage_path).read_bytes() == content
+        viewer = db.scalar(select(User).where(User.username == "audit-user"))
+        assert viewer is not None
+        viewer.role = UserRole.VIEWER
+        db.commit()
+
+    async def read_current_states() -> httpx.Response:
+        active = await client()
+        try:
+            return await active.get("/api/current-states", params={"cost_center_code": "190"})
+        finally:
+            await active.aclose()
+
+    current_states = asyncio.run(read_current_states())
+    assert current_states.status_code == 200
+    returned = next(state for state in current_states.json()["states"] if state["state"] == "returned")
+    assert returned["marker"] == {"column": 12, "category": "recognized_return", "raw_value": "DEVOLVIO"}
+    review_required = next(state for state in current_states.json()["states"] if state["state"] == "review_required")
+    assert review_required["reason"] == "ambiguous_column_l_return_marker_requires_review"
+    assert review_required["marker"] == {"column": 12, "category": "ambiguous_return", "raw_value": "VOLVI� 4"}
+    assert returned["projection_version"] == "audit_l_return_v1"
+    assert "secret note" not in current_states.text
 
 
 def test_audit_import_rejects_unknown_center_duplicates_and_viewers_without_notes(database: sessionmaker[Session]) -> None:
