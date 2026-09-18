@@ -23,6 +23,11 @@ services:
       APP_ENV: ${APP_ENV:-development}
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set in .env}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-28800}
+      IMPORT_STORAGE_PATH: ${IMPORT_STORAGE_PATH:-/data/imports}
+      IMPORT_MAX_UPLOAD_BYTES: ${IMPORT_MAX_UPLOAD_BYTES:-26214400}
+      IMPORT_MAX_XLSX_UNCOMPRESSED_BYTES: ${IMPORT_MAX_XLSX_UNCOMPRESSED_BYTES:-104857600}
+    volumes:
+      - import_data:${IMPORT_STORAGE_PATH:-/data/imports}
     depends_on:
       postgres:
         condition: service_healthy
@@ -59,3 +64,4 @@ services:
 
 volumes:
   postgres_data:
+  import_data:

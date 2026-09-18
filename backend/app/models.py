@@ -197,6 +197,7 @@ class ImportBatch(Base):
     )
     original_filename: Mapped[str] = mapped_column(String(512), nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    storage_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     row_count: Mapped[int] = mapped_column(nullable=False, default=0)
     metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON_DOCUMENT, nullable=True)
     imported_by_user_id: Mapped[uuid.UUID | None] = mapped_column(

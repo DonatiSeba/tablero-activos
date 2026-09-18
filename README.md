@@ -3,7 +3,7 @@
 A local foundation for an internal asset-reconciliation application. The current
 scope provides a containerized API health check, a PostgreSQL-oriented
 persistence schema, local authentication, and a React presentation shell.
-Imports, matching, and dashboard behavior are intentionally deferred to later tasks.
+CC190-style system-report imports are available to authenticated editors and administrators; matching and dashboard behavior remain deferred.
 
 ## Architecture
 
@@ -14,6 +14,9 @@ Imports, matching, and dashboard behavior are intentionally deferred to later ta
 - **Nginx** serves the built frontend and proxies `/api/*` to FastAPI without
   rewriting its path. For example, `POST /api/auth/login` reaches FastAPI as
   `POST /api/auth/login`, and `GET /api/health` reaches the public health alias.
+  Its exact `/api/imports/system` route streams request bodies without an Nginx
+  size cap so the application can enforce its configured limit and record the
+  sanitized oversized-upload audit before multipart parsing.
 
 Only Nginx is published to the host at `http://localhost:8080` by default.
 The database and backend remain internal to Docker Compose.
@@ -40,6 +43,24 @@ are HttpOnly and SameSite=Lax. `APP_ENV=development` is only for local HTTP
 workflows and deliberately makes the cookie non-Secure; every non-development
 configuration sets the Secure flag, so production must be served over HTTPS.
 
+`IMPORT_STORAGE_PATH` is the backend container path for immutable uploaded
+system-report originals. Compose mounts the named `import_data` volume at the
+configured path (default `/data/imports`); retain that volume in backups alongside PostgreSQL. For a
+non-Compose local backend, set `IMPORT_STORAGE_PATH` to a private writable
+directory outside the repository. Files are written once as
+`<sha-prefix>/<sha256>.xlsx`, never from the submitted filename, and should not
+be edited or removed while their import-batch evidence is retained. Publication
+uses a private fsynced temporary file and an atomic no-replace link; an existing
+digest path is hash-verified before it is reused.
+
+`IMPORT_MAX_UPLOAD_BYTES` limits each workbook upload to 25 MiB by default and
+`IMPORT_MAX_XLSX_UNCOMPRESSED_BYTES` limits the XLSX archive's declared expanded
+content to 100 MiB by default. Both values are positive byte counts. Uploads are
+read in bounded chunks and are not saved to evidence storage until they pass
+validation; rejected uploads leave no retained evidence file. The import route
+also rejects an oversized declared or streamed multipart body with HTTP 413
+before FastAPI's multipart parser runs.
+
 ## Initial administrator and local authentication
 
 Run migrations before creating the first administrator. There is intentionally
@@ -63,6 +84,34 @@ checks both the unrevoked, unexpired database session and the active database
 user. API code can apply the server-side `require_viewer`, `require_editor`, or
 `require_admin` dependencies; denied role checks are audit logged. Passwords
 are stored only as Argon2id hashes.
+
+## System-report import API
+
+`POST /api/imports/system` is an editor/admin-only multipart endpoint. Submit a
+`.xlsx` `file` and a `report_date` formatted as `YYYY-MM-DD`. It requires the
+named columns `Rubro`, `Categoría`, `Producto`, `Cód. Ident.`, `Identificación`,
+`Nro. CC`, `Centro de Costo`, and `Estado`; it rejects unreadable reports,
+blank or mixed cost-center codes, empty reports, and a duplicate SHA-256 file.
+
+Accepted reports retain the original file and every nonblank source row as
+immutable evidence. Each row stores ordered cells with their one-based column,
+raw header, and raw value, so blank or duplicate headers cannot overwrite
+source evidence. Assets are associated only by an exact original `Cód.
+Ident.` value; normalized codes, descriptions, and `Identificación` are never
+used as import matching keys. If a report observes more than one cost-center
+name for its code, or differs from an already stored name, the response returns
+an explicit warning while the historical cost-center name is left unchanged.
+Rejected and accepted authorized attempts are audit logged without file bytes
+or row values.
+
+Example after authenticating with the session cookie:
+
+```sh
+curl -X POST http://localhost:8080/api/imports/system \
+  -b cookies.txt \
+  -F file=@report.xlsx \
+  -F report_date=2026-09-17
+```
 
 ## Start and stop
 

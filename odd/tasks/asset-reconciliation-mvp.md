@@ -51,10 +51,10 @@ System, physical-audit, and warehouse-return reports are independent and may dis
   - Checks: `python -m pytest backend/tests` passed (6 tests; 3 Python 3.14 dependency deprecation warnings); clean SQLite Alembic upgrade/downgrade passed; PostgreSQL offline Alembic SQL generation passed; `npm --prefix frontend run build` passed. Independent verification passed. Docker Compose and live PostgreSQL validation could not run because Docker is absent.
   - Evidence: completed 2026-09-17. Models preserve original/normalized evidence, enforce SHA-256 uniqueness and reconciliation coverage, and database triggers reject direct updates/deletes of import batches and observations. Enum serialization is tested against migration values. No work-unit commit was created because the user has not authorized commits.
 
-- [ ] AR-03 Import and validate system-report snapshots.
-  - Outcome: authenticated editors can import the CC 190 system report; the service preserves raw evidence, rejects duplicate hashes, validates columns, normalizes codes, and reports warnings such as divergent CC names.
-  - Checks: parser unit tests using minimal fixtures; duplicate import and validation tests; endpoint integration test.
-  - Evidence: pending.
+- [~] AR-03 Import and validate system-report snapshots.
+  - Outcome: authenticated editors and administrators can import CC 190-style system reports. The service preserves lossless positional raw evidence, stores original files at SHA-256-derived immutable paths, rejects duplicates, validates structure and resource limits before multipart parsing, associates assets only by exact original code, and reports divergent cost-center names without changing historical evidence.
+  - Checks: 29 backend tests passed in a fresh Python 3.14 environment; PostgreSQL offline Alembic SQL reached `20260919_0003`; frontend production build passed; `git diff --check` passed. Final independent verification passed. Docker Compose, live Nginx proxy behavior, and live PostgreSQL migration/import remain blocked because Docker is unavailable.
+  - Evidence: implementation is complete and independently verified on 2026-09-17; awaiting explicit work-unit commit authorization.
 
 - [ ] AR-04 Add audit evidence and deterministic matching.
   - Outcome: audit reports become observations and match system assets by exact code then normalized code, surfacing unresolved evidence without silent merges.
@@ -90,6 +90,9 @@ System, physical-audit, and warehouse-return reports are independent and may dis
 - 2026-09-17: For AR-06, the user selected an explicit initialization command for the first administrator rather than environment bootstrap or a web first-install route.
 - 2026-09-17: AR-06 completed and independently verified after correcting Nginx API forwarding, startup secret validation, isolated authorization-denial auditing, account-enumeration timing defense, and Python 3.14 test dependency compatibility.
 - 2026-09-17: Four verified tasks remain uncommitted. Before AR-03 adds another application area, delivery strategy requires explicit user direction to limit reviewer workload.
+- 2026-09-17: The user authorized one foundation commit instead of risky historical reconstruction. Commit `2978cd1` (`feat: establish asset reconciliation foundation`) contains AR-01, AR-02, and AR-06 plus ODD tracking.
+- 2026-09-17: AR-03 implementation and correction checks reached 28 backend tests, PostgreSQL offline SQL generation, and frontend build. The final independent re-verification is still pending after the pre-parser oversized-import audit correction. Work paused at the user's request; no AR-03 commit was created.
+- 2026-09-17: AR-03 final independent verification passed with 29 backend tests, PostgreSQL offline SQL through `20260919_0003`, frontend build, and whitespace check. A dedicated Nginx import route now delegates request-size enforcement and rejection auditing to the ASGI layer. Docker/live PostgreSQL/Nginx validation remains pending because Docker is unavailable.
 
 ## Next step
-Choose whether to create a reviewed work-unit commit now, continue with AR-03 uncommitted, or pause for a change summary.
+Obtain explicit authorization for the AR-03 work-unit commit before starting AR-04.
