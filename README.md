@@ -3,7 +3,7 @@
 A local foundation for an internal asset-reconciliation application. The current
 scope provides a containerized API health check, a PostgreSQL-oriented
 persistence schema, local authentication, and a React presentation shell.
-CC190-style system-report and physical-audit imports are available to authenticated editors and administrators; dashboard behavior remains deferred.
+CC190-style system-report and physical-audit imports are available to authenticated editors and administrators; authenticated users can view server-calculated dashboard and operational read contracts.
 
 ## Architecture
 
@@ -214,7 +214,7 @@ Expected response:
 {"status":"ok"}
 ```
 
-Open `http://localhost:8080` for the frontend shell. Stop the stack with:
+Open `http://localhost:8080` for the frontend session, dashboard, operations, current-state, and editor-upload views. Stop the stack with:
 
 ```sh
 docker compose down
@@ -265,6 +265,7 @@ Install frontend dependencies and produce the static production build:
 
 ```sh
 npm --prefix frontend ci
+npm --prefix frontend test
 npm --prefix frontend run build
 ```
 
