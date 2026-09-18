@@ -3,7 +3,7 @@
 A local foundation for an internal asset-reconciliation application. The current
 scope provides a containerized API health check, a PostgreSQL-oriented
 persistence schema, local authentication, and a React presentation shell.
-CC190-style system-report imports are available to authenticated editors and administrators; matching and dashboard behavior remain deferred.
+CC190-style system-report and physical-audit imports are available to authenticated editors and administrators; dashboard behavior remains deferred.
 
 ## Architecture
 
@@ -14,9 +14,9 @@ CC190-style system-report imports are available to authenticated editors and adm
 - **Nginx** serves the built frontend and proxies `/api/*` to FastAPI without
   rewriting its path. For example, `POST /api/auth/login` reaches FastAPI as
   `POST /api/auth/login`, and `GET /api/health` reaches the public health alias.
-  Its exact `/api/imports/system` route streams request bodies without an Nginx
-  size cap so the application can enforce its configured limit and record the
-  sanitized oversized-upload audit before multipart parsing.
+  Its exact `/api/imports/system` and `/api/imports/audit` routes stream request
+  bodies without an Nginx size cap so the application can enforce its configured
+  limit and record the sanitized oversized-upload audit before multipart parsing.
 
 Only Nginx is published to the host at `http://localhost:8080` by default.
 The database and backend remain internal to Docker Compose.
@@ -44,7 +44,7 @@ workflows and deliberately makes the cookie non-Secure; every non-development
 configuration sets the Secure flag, so production must be served over HTTPS.
 
 `IMPORT_STORAGE_PATH` is the backend container path for immutable uploaded
-system-report originals. Compose mounts the named `import_data` volume at the
+system-report and physical-audit originals. Compose mounts the named `import_data` volume at the
 configured path (default `/data/imports`); retain that volume in backups alongside PostgreSQL. For a
 non-Compose local backend, set `IMPORT_STORAGE_PATH` to a private writable
 directory outside the repository. Files are written once as
@@ -113,6 +113,40 @@ curl -X POST http://localhost:8080/api/imports/system \
   -F report_date=2026-09-17
 ```
 
+## Physical-audit import API
+
+`POST /api/imports/audit` is an editor/admin-only multipart endpoint. Submit a
+`.xlsx` `file`, an explicit `report_date` (`YYYY-MM-DD`), and an explicit
+existing `cost_center_code`; neither value is inferred from the workbook.
+
+Only physical-audit sheets are imported. Row 3 must contain each exact A:K
+header once: `CANTIDAD`, `IDENTIFICACION`, `MAQUINA/EQUIPO`, `MARCA`, `MODELO `,
+`FUNCIONAMIENTO`, `ESTADO EXTERNO`, `OBSERVACIONES`, `EXISTENCIA EN BRIDGE`,
+`CC FISICO`, and `CC  BG`. Other embedded Bridge/system sheets are reference
+only. Every nonblank row retains its sheet name, source row, ordered cells, and
+positive integer quantity exactly as evidence. Notes and source values are not
+included in errors, audit logs, or the response.
+
+Each imported row creates exactly one derived reconciliation case, regardless of
+quantity. A nonblank `IDENTIFICACION` matches an existing asset by exact
+`original_code` first; only if that has no candidate does NFKC-uppercase,
+whitespace-free `normalized_code` matching apply, and only if it has exactly
+one candidate. ASCII hyphens remain significant. Blank, absent-normalized, and
+ambiguous identifiers retain an unresolved case; imports never create assets or
+aliases from audit inputs. Cases are separate from `ReconciliationResult`, so
+unresolved evidence never fabricates an asset identity. The response exposes
+only aggregate match counts and warnings.
+
+Example after authenticating with the session cookie:
+
+```sh
+curl -X POST http://localhost:8080/api/imports/audit \
+  -b cookies.txt \
+  -F file=@physical-audit.xlsx \
+  -F report_date=2026-06-27 \
+  -F cost_center_code=190
+```
+
 ## Start and stop
 
 Build and start the complete stack:
@@ -167,9 +201,9 @@ Apply the persistence schema with Alembic after setting `DATABASE_URL`:
 python -m alembic -c backend/alembic.ini upgrade head
 ```
 
-The initial migration creates the users, cost centers, assets and aliases,
-immutable import-batch evidence, observations, reconciliation results, and
-audit-log tables. It uses PostgreSQL UUID, JSONB, INET, and enum types while
+The migrations create the users, cost centers, assets and aliases, immutable
+import-batch evidence, observations, derived audit reconciliation cases,
+reconciliation results, and audit-log tables. It uses PostgreSQL UUID, JSONB, INET, and enum types while
 retaining SQLite compatibility for isolated migration tests.
 
 Import batches record a required cost center, report date, and final

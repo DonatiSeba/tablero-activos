@@ -1,4 +1,4 @@
-"""ASGI request-size gate for multipart system-report uploads."""
+"""ASGI request-size gate for multipart evidence uploads."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ Send = Callable[[ASGIMessage], Awaitable[None]]
 ASGIApp = Callable[[dict[str, Any], Receive, Send], Awaitable[None]]
 
 
-class SystemImportBodyLimitMiddleware:
+class ImportBodyLimitMiddleware:
     """Reject oversized import bodies before FastAPI invokes multipart parsing.
 
     The accepted body is replayed only after its complete size is known to be
@@ -34,7 +34,7 @@ class SystemImportBodyLimitMiddleware:
         receive: Receive,
         send: Send,
     ) -> None:
-        if scope["type"] != "http" or scope["method"] != "POST" or scope["path"] != "/api/imports/system":
+        if scope["type"] != "http" or scope["method"] != "POST" or scope["path"] not in {"/api/imports/system", "/api/imports/audit"}:
             await self.app(scope, receive, send)
             return
 
@@ -97,10 +97,14 @@ class SystemImportBodyLimitMiddleware:
                 audit_db.add(
                     AuditLog(
                         user_id=None,
-                        action="imports.system_rejected",
+                        action=(
+                            "imports.audit_rejected"
+                            if scope.get("path") == "/api/imports/audit"
+                            else "imports.system_rejected"
+                        ),
                         target_entity="import",
                         details={"reason": "request_too_large"},
-                        ip_address=SystemImportBodyLimitMiddleware._request_ip(scope),
+                        ip_address=ImportBodyLimitMiddleware._request_ip(scope),
                     )
                 )
                 audit_db.commit()
@@ -132,3 +136,7 @@ class SystemImportBodyLimitMiddleware:
             }
         )
         await send({"type": "http.response.body", "body": content})
+
+
+# Compatibility name for integrations written before audit uploads existed.
+SystemImportBodyLimitMiddleware = ImportBodyLimitMiddleware

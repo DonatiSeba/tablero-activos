@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from .auth import router as auth_router
 from .auth import validate_session_configuration
 from .imports import router as imports_router
-from .request_limits import SystemImportBodyLimitMiddleware
+from .request_limits import ImportBodyLimitMiddleware
 
 
 @asynccontextmanager
@@ -21,7 +21,7 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
-app.add_middleware(SystemImportBodyLimitMiddleware)
+app.add_middleware(ImportBodyLimitMiddleware)
 app.include_router(auth_router)
 app.include_router(imports_router)
 

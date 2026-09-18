@@ -69,6 +69,17 @@ class ReconciliationState(str, enum.Enum):
     REVIEW_REQUIRED = "review_required"
 
 
+class AuditMatchStrategy(str, enum.Enum):
+    EXACT_ORIGINAL_CODE = "exact_original_code"
+    NORMALIZED_CODE = "normalized_code"
+
+
+class AuditMatchReason(str, enum.Enum):
+    MISSING_IDENTIFIER = "missing_identifier"
+    NO_NORMALIZED_CANDIDATE = "no_normalized_candidate"
+    AMBIGUOUS_NORMALIZED_CANDIDATE = "ambiguous_normalized_candidate"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -243,6 +254,45 @@ class AssetObservation(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+class ReconciliationCase(Base):
+    """One derived, deterministic match outcome for one audit observation.
+
+    This deliberately does not reuse ``ReconciliationResult``: unmatched audit
+    evidence has no asset identity and therefore cannot satisfy that table's
+    non-null asset coverage invariant.
+    """
+
+    __tablename__ = "reconciliation_cases"
+    __table_args__ = (
+        UniqueConstraint("audit_observation_id", name="reconciliation_case_per_audit_observation"),
+        CheckConstraint(
+            "(candidate_asset_id IS NOT NULL AND match_strategy IS NOT NULL AND match_reason IS NULL) "
+            "OR (candidate_asset_id IS NULL AND match_strategy IS NULL AND match_reason IS NOT NULL)",
+            name="reconciliation_case_valid_outcome",
+        ),
+        Index("ix_reconciliation_cases_candidate_asset_id", "candidate_asset_id"),
+        Index("ix_reconciliation_cases_cost_center_id", "cost_center_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    audit_observation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("asset_observations.id", ondelete="RESTRICT"), nullable=False
+    )
+    cost_center_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("cost_centers.id", ondelete="RESTRICT"), nullable=False
+    )
+    candidate_asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("assets.id", ondelete="RESTRICT"), nullable=True
+    )
+    match_strategy: Mapped[AuditMatchStrategy | None] = mapped_column(
+        persisted_enum(AuditMatchStrategy, name="audit_match_strategy"), nullable=True
+    )
+    match_reason: Mapped[AuditMatchReason | None] = mapped_column(
+        persisted_enum(AuditMatchReason, name="audit_match_reason"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class ReconciliationResult(Base):

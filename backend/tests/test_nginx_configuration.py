@@ -19,18 +19,18 @@ def test_api_proxy_preserves_the_api_prefix() -> None:
     assert "proxy_pass http://backend:8000/;" not in configuration
 
 
-def test_system_import_proxy_delegates_body_limit_and_audit_to_asgi() -> None:
+def test_evidence_import_proxies_delegate_body_limit_and_audit_to_asgi() -> None:
     configuration = CONFIGURATION_PATH.read_text(encoding="utf-8")
-    import_location = _location_body(configuration, "location = /api/imports/system")
-
-    assert "client_max_body_size 0;" in import_location
-    assert "proxy_request_buffering off;" in import_location
-    assert "proxy_pass http://backend:8000;" in import_location
-    assert "proxy_pass http://backend:8000/;" not in import_location
-    for header in (
-        "proxy_set_header Host $host;",
-        "proxy_set_header X-Real-IP $remote_addr;",
-        "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
-        "proxy_set_header X-Forwarded-Proto $scheme;",
-    ):
-        assert header in import_location
+    for route in ("/api/imports/system", "/api/imports/audit"):
+        import_location = _location_body(configuration, f"location = {route}")
+        assert "client_max_body_size 0;" in import_location
+        assert "proxy_request_buffering off;" in import_location
+        assert "proxy_pass http://backend:8000;" in import_location
+        assert "proxy_pass http://backend:8000/;" not in import_location
+        for header in (
+            "proxy_set_header Host $host;",
+            "proxy_set_header X-Real-IP $remote_addr;",
+            "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;",
+            "proxy_set_header X-Forwarded-Proto $scheme;",
+        ):
+            assert header in import_location
