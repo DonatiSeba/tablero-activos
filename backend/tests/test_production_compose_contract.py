@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 COMPOSE_PATH = Path(__file__).resolve().parents[2] / "docker-compose.production.yml"
+BASE_COMPOSE_PATH = Path(__file__).resolve().parents[2] / "docker-compose.yml"
 
 
 def test_production_compose_isolates_private_services_and_uses_traefik_https() -> None:
@@ -29,3 +30,13 @@ def test_production_compose_uses_a_separate_one_shot_migration_service_and_secre
     assert "POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password" in configuration
     assert "name: activos_postgres_data" in configuration
     assert "name: activos_import_data" in configuration
+    assert "POSTGRES_PASSWORD: null" in configuration
+    assert "DATABASE_URL: null" in configuration
+    assert "SESSION_SECRET: null" in configuration
+
+
+def test_base_compose_does_not_require_a_direct_secret_before_production_override() -> None:
+    configuration = BASE_COMPOSE_PATH.read_text(encoding="utf-8")
+
+    assert "SESSION_SECRET: ${SESSION_SECRET:-}" in configuration
+    assert "SESSION_SECRET:?SESSION_SECRET must be set" not in configuration

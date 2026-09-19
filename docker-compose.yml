@@ -21,7 +21,9 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-asset_app}:${POSTGRES_PASSWORD:-local-development-only-change-me}@postgres:5432/${POSTGRES_DB:-asset_reconciliation}
       APP_ENV: ${APP_ENV:-development}
-      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set in .env}
+      # Production removes this inherited direct setting and mounts SESSION_SECRET_FILE.
+      # Development still fails fast in application startup when this is unset/empty.
+      SESSION_SECRET: ${SESSION_SECRET:-}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-28800}
       IMPORT_STORAGE_PATH: ${IMPORT_STORAGE_PATH:-/data/imports}
       IMPORT_MAX_UPLOAD_BYTES: ${IMPORT_MAX_UPLOAD_BYTES:-26214400}
