@@ -46,6 +46,24 @@ def downgrade_database(database_path: Path) -> None:
     command.downgrade(alembic_config(database_path), "base")
 
 
+def test_alembic_uses_database_url_file_instead_of_ini_fallback(monkeypatch, tmp_path: Path) -> None:
+    migration_database = tmp_path / "from-file.sqlite"
+    fallback_database = tmp_path / "from-ini.sqlite"
+    secret_file = tmp_path / "database_url"
+    secret_file.write_text(f"sqlite+pysqlite:///{migration_database.as_posix()}\n", encoding="utf-8")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL_FILE", str(secret_file))
+
+    configuration = Config(str(ALEMBIC_INI))
+    configuration.set_main_option("sqlalchemy.url", f"sqlite+pysqlite:///{fallback_database.as_posix()}")
+    command.upgrade(configuration, "head")
+
+    engine = create_engine(f"sqlite+pysqlite:///{migration_database.as_posix()}")
+    assert "alembic_version" in inspect(engine).get_table_names()
+    engine.dispose()
+    assert not fallback_database.exists()
+
+
 def test_core_migration_matches_complete_model_inventory_and_constraints(tmp_path: Path) -> None:
     database_path = tmp_path / "core.sqlite"
     upgrade_database(database_path)

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import os
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from app.db import Base
+from app.db import Base, _configured_value
 import app.models  # noqa: F401 - imports model metadata for Alembic
 
 config = context.config
@@ -18,8 +17,8 @@ if config.config_file_name is not None:
 
 
 def database_url() -> str:
-    """Use the runtime URL while selecting psycopg for PostgreSQL URLs."""
-    url = os.environ.get("DATABASE_URL", config.get_main_option("sqlalchemy.url"))
+    """Resolve database settings identically for migrations and application runtime."""
+    url = _configured_value("DATABASE_URL") or config.get_main_option("sqlalchemy.url")
     if url.startswith("postgresql://"):
         return url.replace("postgresql://", "postgresql+psycopg://", 1)
     return url
