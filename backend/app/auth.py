@@ -14,7 +14,7 @@ from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatc
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from itsdangerous import BadSignature, SignatureExpired, TimestampSigner
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .db import _configured_value, get_db
@@ -39,6 +39,12 @@ class CurrentUserResponse(BaseModel):
     username: str
     display_name: str
     role: UserRole
+    must_change_password: bool
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=1024)
+    new_password: str = Field(min_length=12, max_length=1024)
 
 
 def _environment() -> str:
@@ -154,6 +160,29 @@ def _unauthorized() -> HTTPException:
     return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
 
 
+def _locked_current_auth_state(
+    db: Session,
+    user_id: uuid.UUID,
+    session_id: uuid.UUID,
+) -> tuple[User | None, UserSession | None]:
+    """Lock and refresh the credential owner before re-reading its current session."""
+    user = db.scalar(
+        select(User)
+        .where(User.id == user_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if user is None:
+        return None, None
+    auth_session = db.scalar(
+        select(UserSession)
+        .where(UserSession.id == session_id, UserSession.user_id == user_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return user, auth_session
+
+
 def get_current_user(request: Request, db: Annotated[Session, Depends(get_db)]) -> User:
     """Resolve a signed cookie to an unrevoked session and active database user."""
     cookie = request.cookies.get(SESSION_COOKIE_NAME)
@@ -190,6 +219,16 @@ def require_role(required_role: UserRole):
         db: Annotated[Session, Depends(get_db)],
         user: Annotated[User, Depends(get_current_user)],
     ) -> User:
+        if user.must_change_password:
+            write_denial_audit_log(
+                db,
+                request,
+                action="auth.password_change_required",
+                target_entity="user",
+                user_id=user.id,
+                details={"required_role": required_role.value},
+            )
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Password change required")
         if user.role not in allowed_roles:
             write_denial_audit_log(
                 db,
@@ -271,3 +310,78 @@ def logout(
 @router.get("/me", response_model=CurrentUserResponse)
 def me(user: Annotated[User, Depends(get_current_user)]) -> User:
     return user
+
+
+@router.post("/change-password", response_model=CurrentUserResponse)
+def change_password(
+    credentials: ChangePasswordRequest,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Change the authenticated user's password and invalidate every other session."""
+    dependency_session: UserSession = request.state.auth_session
+    locked_user, current_session = _locked_current_auth_state(db, user.id, dependency_session.id)
+    if locked_user is None:
+        db.rollback()
+        raise _unauthorized()
+
+    try:
+        current_password_valid = password_hasher.verify(locked_user.password_hash, credentials.current_password)
+    except (InvalidHashError, VerificationError, VerifyMismatchError):
+        current_password_valid = False
+
+    if (
+        not locked_user.is_active
+        or current_session is None
+        or current_session.revoked_at is not None
+        or _is_expired(current_session.expires_at)
+    ):
+        db.rollback()
+        raise _unauthorized()
+    if not current_password_valid:
+        write_audit_log(
+            db,
+            request,
+            action="auth.password_change_denied",
+            target_entity="user",
+            target_id=locked_user.id,
+            user_id=locked_user.id,
+            details={"reason": "current_password_invalid"},
+        )
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect")
+    if credentials.new_password == credentials.current_password:
+        write_audit_log(
+            db,
+            request,
+            action="auth.password_change_denied",
+            target_entity="user",
+            target_id=locked_user.id,
+            user_id=locked_user.id,
+            details={"reason": "password_unchanged"},
+        )
+        db.commit()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="New password must be different")
+
+    locked_user.password_hash = password_hasher.hash(credentials.new_password)
+    locked_user.must_change_password = False
+    db.execute(
+        update(UserSession)
+        .where(
+            UserSession.user_id == locked_user.id,
+            UserSession.id != current_session.id,
+            UserSession.revoked_at.is_(None),
+        )
+        .values(revoked_at=_now())
+    )
+    write_audit_log(
+        db,
+        request,
+        action="auth.password_changed",
+        target_entity="user",
+        target_id=locked_user.id,
+        user_id=locked_user.id,
+    )
+    db.commit()
+    return locked_user

@@ -11,6 +11,7 @@ from .dashboard import router as dashboard_router
 from .imports import router as imports_router
 from .request_limits import ImportBodyLimitMiddleware
 from .readiness import is_ready
+from .users import router as users_router
 
 
 @asynccontextmanager
@@ -27,6 +28,7 @@ app = FastAPI(
 )
 app.add_middleware(ImportBodyLimitMiddleware)
 app.include_router(auth_router)
+app.include_router(users_router)
 app.include_router(imports_router)
 app.include_router(current_states_router)
 app.include_router(dashboard_router)

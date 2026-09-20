@@ -1,10 +1,12 @@
 import asyncio
 from collections.abc import Generator
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 from fastapi import Depends, HTTPException
 from sqlalchemy import create_engine, select
+from sqlalchemy.dialects import postgresql
 from starlette.requests import Request
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -77,6 +79,7 @@ def test_login_me_and_logout_use_argon2id_signed_database_session(database: sess
                 "username": "alice",
                 "display_name": "Alice",
                 "role": "viewer",
+                "must_change_password": False,
             }
             assert "HttpOnly" in login.headers["set-cookie"]
             assert "SameSite=lax" in login.headers["set-cookie"]
@@ -196,6 +199,92 @@ def test_each_request_rechecks_active_user_and_database_session(database: sessio
             assert (await client.get("/api/auth/me")).status_code == 401
 
     asyncio.run(exercise())
+
+
+def test_change_password_locks_and_refreshes_reset_state_before_mutation(
+    database: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user = add_user(database)
+    with database() as setup_db:
+        auth_session = UserSession(
+            user_id=user.id,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        setup_db.add(auth_session)
+        setup_db.commit()
+        session_id = auth_session.id
+
+    with database() as stale_db:
+        stale_user = stale_db.get(User, user.id)
+        stale_session = stale_db.get(UserSession, session_id)
+        assert stale_user is not None and stale_session is not None
+
+        temporary_password = "temporary reset credential"
+        with database() as reset_db:
+            reset_user = reset_db.get(User, user.id)
+            reset_session = reset_db.get(UserSession, session_id)
+            assert reset_user is not None and reset_session is not None
+            reset_hash = password_hasher.hash(temporary_password)
+            reset_user.password_hash = reset_hash
+            reset_user.must_change_password = True
+            reset_session.revoked_at = datetime.now(timezone.utc)
+            reset_db.commit()
+
+        verified_hashes: list[str] = []
+
+        class RecordingPasswordHasher:
+            @staticmethod
+            def verify(password_hash: str, password: str) -> bool:
+                verified_hashes.append(password_hash)
+                return password_hasher.verify(password_hash, password)
+
+            @staticmethod
+            def hash(password: str) -> str:
+                return password_hasher.hash(password)
+
+        class RecordingSession:
+            def __init__(self, session: Session) -> None:
+                self.session = session
+                self.lock_queries: list[tuple[str, bool]] = []
+
+            def scalar(self, statement):
+                sql = str(statement.compile(dialect=postgresql.dialect()))
+                populate_existing = bool(statement.get_execution_options().get("populate_existing"))
+                self.lock_queries.append((sql, populate_existing))
+                return self.session.scalar(statement)
+
+            def __getattr__(self, name: str):
+                return getattr(self.session, name)
+
+        monkeypatch.setattr(auth, "password_hasher", RecordingPasswordHasher())
+        recording_db = RecordingSession(stale_db)
+        request = Request({"type": "http", "headers": [], "client": ("127.0.0.1", 50000)})
+        request.state.auth_session = stale_session
+
+        with pytest.raises(HTTPException) as denied:
+            auth.change_password(
+                credentials=auth.ChangePasswordRequest(
+                    current_password="correct horse battery staple",
+                    new_password="new correct horse battery staple",
+                ),
+                request=request,
+                db=recording_db,
+                user=stale_user,
+            )
+
+        assert denied.value.status_code == 401
+        assert verified_hashes == [reset_hash]
+        assert len(recording_db.lock_queries) == 2
+        assert all("FOR UPDATE" in sql for sql, _ in recording_db.lock_queries)
+        assert all(populate_existing for _, populate_existing in recording_db.lock_queries)
+
+    with database() as verification_db:
+        persisted_user = verification_db.get(User, user.id)
+        persisted_session = verification_db.get(UserSession, session_id)
+        assert persisted_user is not None and persisted_session is not None
+        assert persisted_user.must_change_password is True
+        assert password_hasher.verify(persisted_user.password_hash, temporary_password)
+        assert persisted_session.revoked_at is not None
 
 
 def test_denied_authorization_audit_uses_an_isolated_transaction(database: sessionmaker[Session]) -> None:

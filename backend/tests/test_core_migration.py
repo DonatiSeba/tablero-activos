@@ -242,6 +242,36 @@ def test_migrated_database_persists_and_reads_enum_values_through_orm(tmp_path: 
     engine.dispose()
 
 
+def test_password_change_migration_backfills_existing_users(tmp_path: Path) -> None:
+    database_path = tmp_path / "password-change.sqlite"
+    configuration = alembic_config(database_path)
+    command.upgrade(configuration, "20260921_0005")
+
+    engine = create_engine(f"sqlite+pysqlite:///{database_path.as_posix()}")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO users "
+                "(id, username, email, display_name, password_hash, role, is_active) "
+                "VALUES ('0000000000000000000000000000000010', 'existing', "
+                "'existing@example.test', 'Existing', 'hash', 'viewer', 1)"
+            )
+        )
+    engine.dispose()
+
+    command.upgrade(configuration, "head")
+    engine = create_engine(f"sqlite+pysqlite:///{database_path.as_posix()}")
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT must_change_password FROM users WHERE username = 'existing'")).scalar_one() == 0
+    assert "must_change_password" in {column["name"] for column in inspect(engine).get_columns("users")}
+    engine.dispose()
+
+    command.downgrade(configuration, "20260921_0005")
+    engine = create_engine(f"sqlite+pysqlite:///{database_path.as_posix()}")
+    assert "must_change_password" not in {column["name"] for column in inspect(engine).get_columns("users")}
+    engine.dispose()
+
+
 def test_clean_sqlite_upgrade_then_downgrade_removes_domain_schema(tmp_path: Path) -> None:
     database_path = tmp_path / "round-trip.sqlite"
     upgrade_database(database_path)
