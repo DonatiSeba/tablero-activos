@@ -43,7 +43,6 @@ type Summary = {
   charts: { general_status_donut: DonutChart; time_evolution: TimeEvolution };
 };
 type SummariesResponse = { summaries: Summary[]; page: Page; selection_rule: string; metric_scope: string };
-type ReconciliationMetrics = ExecutiveMetrics;
 type DrilldownResponse = {
   cost_center: CostCenter | null;
   source: Source;
@@ -51,11 +50,23 @@ type DrilldownResponse = {
   executive_metrics?: ExecutiveMetrics;
   operational_issues?: OperationalIssues;
   page: Page;
-  groups: { rubro: string | null; reconciliation_metrics: ReconciliationMetrics; categories: { category: string | null; reconciliation_metrics: ReconciliationMetrics; products: { product: string | null; observation_count: number; distinct_asset_count: number; status_counts: { status: string | null; count: number }[]; reconciliation_metrics: ReconciliationMetrics }[] }[] }[];
   charts: {
     primary_stacked_bar: { available: boolean; reason?: string | null; scope?: string; series: { key: "found_in_cost_center_count" | "returned_count" | "difference_count"; label: string }[]; items: ({ rubro: string | null; category: string | null } & ExecutiveMetrics)[] };
     general_status_donut: DonutChart;
   };
+};
+type RubroOption = { value: string | null; label: string };
+type RubroChart = {
+  available: boolean;
+  reason: string | null;
+  series: { key: "found_in_cost_center_count" | "returned_count" | "difference_count"; label: string }[];
+  items: { category: string | null; category_label: string; found_in_cost_center_count: number | null; returned_count: number | null; difference_count: number | null }[];
+};
+type RubroReconciliationResponse = {
+  cost_center: CostCenter | null;
+  rubro_options: RubroOption[];
+  selected_rubro: RubroOption | null;
+  category_chart: RubroChart;
 };
 type ImportHistory = { items: { batch_id: string; source: string; cost_center: CostCenter; report_date: string; imported_at: string; imported_by_display_name: string | null; row_count: number; status: string; warning_counts: Record<string, number>; processing_counts: Record<string, number> }[]; page: Page };
 type ReviewQueue = { items: { id: string; category: string; cost_center: CostCenter; asset: { id: string; code: string | null } | null; source: { report_date: string }; reason: string; inference?: string }[]; queue_counts: Record<string, number>; page: Page };
@@ -85,8 +96,8 @@ function Empty({ children }: { children: ReactNode }) { return <p className="emp
 function date(value: string | null) { return value || "Sin fecha informada"; }
 function number(value: number | null) { return value === null ? "No disponible" : new Intl.NumberFormat("es-AR").format(value); }
 function percentage(value: number | null) { return value === null ? "No disponible" : `${new Intl.NumberFormat("es-AR", { maximumFractionDigits: 2 }).format(value)} %`; }
-function hierarchyLabel(value: string | null, level: "rubro" | "categoría" | "producto" | "estado") {
-  const emptyLabels = { rubro: "Sin rubro asignado", categoría: "Sin categoría asignada", producto: "Sin producto asignado", estado: "Sin estado informado" };
+function hierarchyLabel(value: string | null, level: "rubro" | "categoría") {
+  const emptyLabels = { rubro: "Sin rubro asignado", categoría: "Sin categoría asignada" };
   return value || emptyLabels[level];
 }
 function roleLabel(role: Role) { return { viewer: "Consulta", editor: "Editor", admin: "Administrador" }[role]; }
@@ -115,13 +126,21 @@ function metricScopeLabel(scope: string) { return metricScopeLabels[scope] || "L
 function sourceLabel(source: string) { return sourceLabels[source] || "Fuente no reconocida"; }
 function importStatusLabel(status: string) { return importStatusLabels[status] || "Estado de importación no reconocido"; }
 function reviewCategoryLabel(category: string) { return reviewCategoryLabels[category] || "Categoría de revisión no reconocida"; }
-function stateLabel(state: string | null) { return state === null ? hierarchyLabel(state, "estado") : stateLabels[state] || "Estado no reconocido"; }
+function stateLabel(state: string | null) { return state === null ? "Sin estado informado" : stateLabels[state] || "Estado no reconocido"; }
 function reasonLabel(reason: string | null | undefined) { return reason ? reasonLabels[reason] || "El motivo informado no está reconocido." : "Sin motivo informado."; }
 function chartLabel(key: string) { return chartLabels[key] || "Serie no reconocida"; }
 function chartReason(reason?: string | null) {
   if (reason === "system_and_audit_evidence_required") return "Se requieren evidencias vigentes de sistema y auditoría para este gráfico.";
   if (reason === "fewer_than_two_comparable_snapshots") return "Aún no hay dos instantáneas comparables para mostrar una evolución.";
   if (reason === "return_event_time_evidence_unavailable") return "La evolución de retornos no está disponible porque no existe evidencia temporal de esos eventos.";
+  return "La información para este gráfico no está disponible.";
+}
+function rubroChartReason(reason?: string | null) {
+  if (reason === "missing_system_evidence") return "No hay evidencia vigente de sistema para mostrar rubros y categorías.";
+  if (reason === "missing_audit_evidence") return "No hay evidencia vigente de auditoría para conciliar las categorías seleccionadas.";
+  if (reason === "empty_rubro") return "El rubro seleccionado no tiene categorías para mostrar.";
+  if (reason === "invalid_rubro_selection") return "El rubro seleccionado ya no está disponible para este centro de costo.";
+  if (reason === "cost_center_not_found") return "El centro de costo seleccionado no está disponible.";
   return "La información para este gráfico no está disponible.";
 }
 function freshnessText(freshness: Freshness) {
@@ -131,9 +150,8 @@ function freshnessText(freshness: Freshness) {
   if (freshness.status === "missing_both") return "No hay evidencia vigente de sistema ni de auditoría para comparar el corte.";
   return "Las fuentes requieren atención antes de comparar el corte.";
 }
-function statusLabel(status: string | null) { return stateLabel(status); }
 
-function EChart({ option, ariaLabel }: { option: EChartsOption; ariaLabel: string }) {
+function EChart({ option, ariaLabel, height }: { option: EChartsOption; ariaLabel: string; height?: number }) {
   const element = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!element.current) return;
@@ -143,7 +161,7 @@ function EChart({ option, ariaLabel }: { option: EChartsOption; ariaLabel: strin
     window.addEventListener("resize", resize);
     return () => { window.removeEventListener("resize", resize); chart.dispose(); };
   }, [option]);
-  return <div className="chart" role="img" aria-label={ariaLabel} ref={element} />;
+  return <div className="chart" style={height ? { height } : undefined} role="img" aria-label={ariaLabel} ref={element} />;
 }
 
 const metricIcons = { blue: "▤", green: "✓", cyan: "↩", red: "!", yellow: "◎" } as const;
@@ -180,6 +198,21 @@ function StackedBars({ chart }: { chart: DrilldownResponse["charts"]["primary_st
     series: chart.series.map((series) => ({ name: chartLabel(series.label), type: "bar", stack: "conciliación", emphasis: { focus: "series" }, data: chart.items.map((item) => item[series.key]) })),
   }} />;
 }
+function CategoryBars({ chart }: { chart: RubroChart }) {
+  if (!chart.available) return <Empty>{rubroChartReason(chart.reason)}</Empty>;
+  if (chart.items.length === 0) return <Empty>No hay categorías para el rubro seleccionado.</Empty>;
+  const colors: Record<string, string> = { found_in_cost_center_count: "#17855f", returned_count: "#168aad", difference_count: "#c74545" };
+  const height = Math.max(310, chart.items.length * 48 + 82);
+  return <div className="category-chart-scroll"><EChart height={height} ariaLabel="Barras agrupadas de conciliación por categoría" option={{
+    color: chart.series.map((series) => colors[series.key] || "#627587"),
+    tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+    legend: { bottom: 0, data: chart.series.map((series) => chartLabel(series.label)) },
+    grid: { left: 16, right: 24, top: 24, bottom: 52, containLabel: true },
+    xAxis: { type: "value", minInterval: 1 },
+    yAxis: { type: "category", data: chart.items.map((item) => item.category_label) },
+    series: chart.series.map((series) => ({ name: chartLabel(series.label), type: "bar", emphasis: { focus: "series" }, data: chart.items.map((item) => item[series.key]) })),
+  }} /></div>;
+}
 function Evolution({ chart }: { chart: TimeEvolution }) {
   if (!chart.available) return <Empty>{chartReason(chart.reason)}</Empty>;
   return <>
@@ -215,24 +248,6 @@ function OperationalIssues({ issues }: { issues: OperationalIssues }) {
   </div></section>;
 }
 
-function Coverage({ value }: { value: number | null }) {
-  return <div className="coverage"><span className="coverage-track" aria-hidden="true"><span style={{ width: value === null ? "0%" : `${Math.max(0, Math.min(100, value))}%` }} /></span><span>{percentage(value)}</span></div>;
-}
-function ReconciliationTable({ groups }: { groups: DrilldownResponse["groups"] }) {
-  return <div className="table-scroll reconciliation-table"><table><thead><tr><th>Jerarquía</th><th>En sistema</th><th>En CC</th><th>Retornados</th><th>Contabilizados</th><th>Diferencia</th><th>Cobertura</th></tr></thead><tbody>{groups.flatMap((rubro) => {
-    const rubroKey = String(rubro.rubro);
-    const rubroRows = [<tr className="rubro-row" key={`${rubroKey}-rubro`}><td><strong>Rubro · {hierarchyLabel(rubro.rubro, "rubro")}</strong></td><MetricCells metrics={rubro.reconciliation_metrics} /></tr>];
-    const categoryRows = rubro.categories.flatMap((category) => {
-      const categoryKey = `${rubroKey}-${String(category.category)}`;
-      return [<tr className="category-row" key={`${categoryKey}-category`}><td><span className="tree-mark" aria-hidden="true">↳</span><strong>{hierarchyLabel(category.category, "categoría")}</strong></td><MetricCells metrics={category.reconciliation_metrics} /></tr>, ...category.products.map((product) => <tr className="product-row" key={`${categoryKey}-${String(product.product)}`}><td><span className="tree-mark" aria-hidden="true">↳</span><div><span>{hierarchyLabel(product.product, "producto")}</span><small>{number(product.distinct_asset_count)} activos · {number(product.observation_count)} observaciones</small><div className="status-list">{product.status_counts.map((item) => <span className="status" key={String(item.status)}>{statusLabel(item.status)} · {number(item.count)}</span>)}</div></div></td><MetricCells metrics={product.reconciliation_metrics} /></tr>)];
-    });
-    return [...rubroRows, ...categoryRows];
-  })}</tbody></table></div>;
-}
-function MetricCells({ metrics }: { metrics: ExecutiveMetrics }) {
-  return <><td className="num">{number(metrics.system_count)}</td><td className="num">{number(metrics.found_in_cost_center_count)}</td><td className="num">{number(metrics.returned_count)}</td><td className="num">{number(metrics.accounted_count)}</td><td className="num difference-value">{number(metrics.difference_count)}</td><td><Coverage value={metrics.coverage_percent} /></td></>;
-}
-
 function ServerPagination({ page, busy, label, onNavigate }: { page: Page; busy: boolean; label: string; onNavigate: (offset: number, limit: number) => void }) {
   const pageNumber = Math.floor(page.offset / page.limit) + 1;
   const pageCount = Math.max(1, Math.ceil(page.total_count / page.limit));
@@ -254,6 +269,10 @@ function Dashboard() {
   const [drilldownError, setDrilldownError] = useState<string | null>(null);
   const [drilldownLoading, setDrilldownLoading] = useState(false);
   const [drilldownRequest, setDrilldownRequest] = useState<{ offset: number; limit: number } | null>(null);
+  const [rubroChart, setRubroChart] = useState<RubroReconciliationResponse | null>(null);
+  const [rubroChartError, setRubroChartError] = useState<string | null>(null);
+  const [rubroChartLoading, setRubroChartLoading] = useState(false);
+  const [requestedRubro, setRequestedRubro] = useState<string | null | undefined>(undefined);
 
   function selectCenter(code: string | null) {
     selectedCodeRef.current = code;
@@ -261,6 +280,15 @@ function Dashboard() {
     setDrilldownRequest(null);
     setDrilldown(null);
     setDrilldownError(null);
+    setRequestedRubro(undefined);
+    setRubroChart(null);
+    setRubroChartError(null);
+  }
+
+  function selectRubro(value: string) {
+    setRequestedRubro(value || null);
+    setRubroChart(null);
+    setRubroChartError(null);
   }
 
   async function loadSummaryPage(page?: { offset: number; limit: number }) {
@@ -303,6 +331,23 @@ function Dashboard() {
     return () => { active = false; };
   }, [selectedCode, drilldownRequest]);
 
+  useEffect(() => {
+    if (!selectedCode) return;
+    let active = true;
+    setRubroChartLoading(true);
+    setRubroChart(null);
+    setRubroChartError(null);
+    const rubro = requestedRubro === undefined ? "" : `&rubro=${encodeURIComponent(requestedRubro ?? "")}`;
+    request<RubroReconciliationResponse>(`/dashboard/rubro-reconciliation-chart?cost_center_code=${encodeURIComponent(selectedCode)}${rubro}`).then((response) => {
+      if (active) setRubroChart(response);
+    }).catch((e: ApiError) => {
+      if (active) setRubroChartError(publicError(e));
+    }).finally(() => {
+      if (active) setRubroChartLoading(false);
+    });
+    return () => { active = false; };
+  }, [selectedCode, requestedRubro]);
+
   function navigateDrilldown(offset: number, limit: number) {
     if (drilldownLoading) return;
     setDrilldownLoading(true);
@@ -323,9 +368,9 @@ function Dashboard() {
       <Kpis metrics={selected.executive_metrics} />
       <ErrorNotice error={drilldownError} />
       {!drilldown && !drilldownError && <div className="loading-card" role="status">Cargando conciliación agrupada…</div>}
-      <div className="dashboard-grid dashboard-grid-primary"><section className="panel chart-panel"><div className="panel-heading"><div><h2>Conciliación por rubro y categoría</h2><p>Encontrados, retornados y diferencia del corte seleccionado</p></div><span className="chip">Último corte</span></div>{drilldown ? <StackedBars chart={drilldown.charts.primary_stacked_bar} /> : <div className="chart-placeholder" />}</section><section className="panel chart-panel"><div className="panel-heading"><div><h2>Estado general</h2><p>Composición informada por el servidor</p></div><span className="chip">{percentage(selected.executive_metrics.coverage_percent)} cobertura</span></div><Donut chart={drilldown?.charts.general_status_donut || selected.charts.general_status_donut} /></section></div>
+      <div className="dashboard-grid dashboard-grid-primary"><section className="panel chart-panel"><div className="panel-heading"><div><h2>Conciliación por rubro y categoría</h2><p>Encontrados, retornados y diferencia del corte seleccionado</p></div><span className="chip">Último corte</span></div>{drilldown ? <><StackedBars chart={drilldown.charts.primary_stacked_bar} /><ServerPagination page={drilldown.page} busy={drilldownLoading} label="Paginación del gráfico principal de conciliación" onNavigate={navigateDrilldown} /></> : <div className="chart-placeholder" />}</section><section className="panel chart-panel"><div className="panel-heading"><div><h2>Estado general</h2><p>Composición informada por el servidor</p></div><span className="chip">{percentage(selected.executive_metrics.coverage_percent)} cobertura</span></div><Donut chart={drilldown?.charts.general_status_donut || selected.charts.general_status_donut} /></section></div>
       <div className="dashboard-grid"><section className="panel chart-panel"><div className="panel-heading"><div><h2>Evolución temporal</h2><p>Instantáneas comparables del centro seleccionado</p></div><span className="chip">Histórico</span></div><Evolution chart={selected.charts.time_evolution} /></section><OperationalIssues issues={drilldown?.operational_issues || selected.operational_issues} /></div>
-      <section className="panel hierarchy-panel" aria-labelledby="hierarchy-heading"><div className="panel-heading"><div><h2 id="hierarchy-heading">Detalle de conciliación</h2><p>Rubro → Categoría → Producto · métricas calculadas por el servidor</p></div><span className="chip">Agrupado</span></div>{drilldown?.groups.length === 0 && <Empty>No hay evidencia de sistema agrupada para este centro de costo.</Empty>}{drilldown && drilldown.groups.length > 0 && <ReconciliationTable groups={drilldown.groups} />}{drilldown && <ServerPagination page={drilldown.page} busy={drilldownLoading} label="Paginación del detalle de conciliación" onNavigate={navigateDrilldown} />}</section>
+      <section className="panel rubro-chart-panel" aria-labelledby="rubro-chart-heading"><div className="panel-heading"><div><h2 id="rubro-chart-heading">Detalle de conciliación</h2><p>Seleccione un rubro para ver sus categorías y métricas informadas por el servidor.</p></div><span className="chip">Por categoría</span></div>{rubroChartLoading && <div className="loading-card" role="status">Cargando categorías del rubro…</div>}<ErrorNotice error={rubroChartError} />{rubroChart && <>{rubroChart.rubro_options.length === 0 ? <Empty>No hay rubros disponibles para este centro de costo.</Empty> : <label className="rubro-select">Rubro<select value={rubroChart.selected_rubro?.value ?? ""} disabled={rubroChartLoading} onChange={(event) => selectRubro(event.target.value)}>{rubroChart.rubro_options.map((option) => <option key={option.value ?? "unassigned"} value={option.value ?? ""}>{option.label}</option>)}</select></label>}<CategoryBars chart={rubroChart.category_chart} /></>}</section>
     </>}
     {data && <p className="metric-scope">{metricScopeLabel(data.metric_scope)}</p>}
   </section>;

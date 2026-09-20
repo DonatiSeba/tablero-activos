@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("echarts", () => ({ init: () => ({ setOption: vi.fn(), resize: vi.fn(), dispose: vi.fn() }) }));
+const { setOptionMock } = vi.hoisted(() => ({ setOptionMock: vi.fn() }));
+vi.mock("echarts", () => ({ init: () => ({ setOption: setOptionMock, resize: vi.fn(), dispose: vi.fn() }) }));
 
 import { App } from "./app";
 
@@ -33,18 +34,36 @@ const summary = {
 };
 const drilldown = {
   cost_center: { code: "190", name: "Principal" }, source: summary.summaries[0].latest_sources.system, audit_source: summary.summaries[0].latest_sources.audit,
-  executive_metrics: executiveMetrics, operational_issues: operationalIssues, groups: [{ rubro: null, reconciliation_metrics: executiveMetrics, categories: [{ category: null, reconciliation_metrics: executiveMetrics, products: [{ product: null, observation_count: 4, distinct_asset_count: 4, status_counts: [{ status: null, count: 3 }, { status: "Active", count: 1 }], reconciliation_metrics: executiveMetrics }] }] }],
+  executive_metrics: executiveMetrics, operational_issues: operationalIssues,
   charts: { primary_stacked_bar: { available: true, series: [{ key: "found_in_cost_center_count", label: "found_in_cost_center" }, { key: "returned_count", label: "returned" }, { key: "difference_count", label: "difference" }], items: [{ rubro: null, category: null, ...executiveMetrics }] }, general_status_donut: summary.summaries[0].charts.general_status_donut },
   page: { limit: 100, offset: 0, has_more: false, total_count: 1 },
 };
-type PaginatedDrilldownFixture = Omit<typeof drilldown, "groups"> & {
-  groups: Array<Omit<(typeof drilldown)["groups"][number], "rubro"> & { rubro: string | null }>;
+type RubroChartFixture = {
+  cost_center: { code: string; name: string };
+  rubro_options: { value: string | null; label: string }[];
+  selected_rubro: { value: string | null; label: string } | null;
+  category_chart: {
+    available: boolean;
+    reason: string | null;
+    series: { key: string; label: string }[];
+    items: { category: string | null; category_label: string; found_in_cost_center_count: number | null; returned_count: number | null; difference_count: number | null }[];
+  };
+};
+const rubroChart: RubroChartFixture = {
+  cost_center: { code: "190", name: "Principal" },
+  rubro_options: [{ value: "Rubro & Ácento", label: "Rubro & Ácento" }, { value: null, label: "Sin rubro asignado" }],
+  selected_rubro: { value: "Rubro & Ácento", label: "Rubro & Ácento" },
+  category_chart: {
+    available: true, reason: null,
+    series: [{ key: "found_in_cost_center_count", label: "found_in_cost_center" }, { key: "returned_count", label: "returned" }, { key: "difference_count", label: "difference" }],
+    items: [{ category: null, category_label: "Sin categoría asignada", found_in_cost_center_count: 7, returned_count: 3, difference_count: 2 }, { category: "Muebles", category_label: "Muebles", found_in_cost_center_count: 4, returned_count: 1, difference_count: 5 }],
+  },
 };
 const importHistory = { items: [{ batch_id: "batch-1", source: "system", cost_center: { code: "190", name: "Principal" }, report_date: "2026-09-17", imported_at: "2026-09-17T10:00:00Z", imported_by_display_name: "Usuario editor", row_count: 4, status: "completed", warning_counts: {}, processing_counts: {} }], page: {} };
 const reviewQueue = { items: [{ id: "case-1", category: "unresolved_identifier", cost_center: { code: "190", name: "Principal" }, asset: null, source: { report_date: "2026-09-17" }, reason: "missing_identifier" }], queue_counts: { total: 1 }, page: {} };
 const currentStates = { states: [{ asset_id: "asset-1", asset_code: "ACT-01", cost_center: { code: "190", name: "Principal" }, state: "returned", reason: "authorized_post_audit_column_l_return_marker", marker: { column: 12, category: "recognized_return", raw_value: "DEVOLVIO" }, source_report_date: "2026-09-17", projection_version: "audit_l_return_v1" }] };
 
-type FetchResponses = { summaries?: unknown; drilldown?: unknown; importHistory?: unknown; reviewQueue?: unknown; currentStates?: unknown; users?: unknown };
+type FetchResponses = { summaries?: unknown; drilldown?: unknown; rubroChart?: unknown; importHistory?: unknown; reviewQueue?: unknown; currentStates?: unknown; users?: unknown };
 function json(data: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } })); }
 function installViewport(matchesMobile: boolean) {
   vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
@@ -62,6 +81,7 @@ function installFetch(user: object | null = viewer, responses: FetchResponses = 
     if (url === "/api/auth/login") return json(viewer);
     if (url === "/api/dashboard/summaries") return json(responses.summaries ?? summary);
     if (url.startsWith("/api/dashboard/system-drilldown")) return json(responses.drilldown ?? drilldown);
+    if (url.startsWith("/api/dashboard/rubro-reconciliation-chart")) return json(responses.rubroChart ?? rubroChart);
     if (url === "/api/operations/import-history") return json(responses.importHistory ?? importHistory);
     if (url === "/api/operations/review-queue") return json(responses.reviewQueue ?? reviewQueue);
     if (url === "/api/current-states") return json(responses.currentStates ?? currentStates);
@@ -79,7 +99,7 @@ function installFetch(user: object | null = viewer, responses: FetchResponses = 
 }
 
 describe("sesión y vistas de presentación", () => {
-  beforeEach(() => vi.unstubAllGlobals());
+  beforeEach(() => { vi.unstubAllGlobals(); setOptionMock.mockClear(); });
   afterEach(() => cleanup());
 
   it("muestra el inicio de sesión en español y accede sin almacenamiento local", async () => {
@@ -101,16 +121,17 @@ describe("sesión y vistas de presentación", () => {
     expect(screen.getByRole("button", { name: "Importaciones" })).toBeInTheDocument();
   });
 
-  it("selecciona un centro de costo y solicita su detalle real automáticamente", async () => {
+  it("solicita el rubro predeterminado sin parámetro y lo reinicia al cambiar de centro", async () => {
     const multipleSummaries = structuredClone(summary);
     multipleSummaries.summaries.push({ ...structuredClone(summary.summaries[0]), cost_center: { code: "191", name: "Centro secundario" } });
     const fetchMock = installFetch(viewer, { summaries: multipleSummaries }); render(<App />);
     const selector = await screen.findByLabelText("Centro de costo");
     expect(selector).toHaveValue("190");
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/system-drilldown?cost_center_code=190", expect.objectContaining({ credentials: "include" })));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190", expect.objectContaining({ credentials: "include" })));
+    expect(await screen.findByLabelText("Rubro")).toHaveValue("Rubro & Ácento");
     fireEvent.change(selector, { target: { value: "191" } });
-    expect((await screen.findAllByText("CC 191 · Centro secundario")).length).toBeGreaterThan(0);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/system-drilldown?cost_center_code=191", expect.objectContaining({ credentials: "include" })));
+    expect(screen.queryByRole("img", { name: "Barras agrupadas de conciliación por categoría" })).not.toBeInTheDocument();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=191", expect.objectContaining({ credentials: "include" })));
   });
 
   it("avanza y regresa entre páginas del servidor de centros de costo", async () => {
@@ -124,6 +145,7 @@ describe("sesión y vistas de presentación", () => {
       if (url === "/api/dashboard/summaries") return json(firstPage);
       if (url === "/api/dashboard/summaries?limit=1&offset=1") return json(secondPage);
       if (url === "/api/dashboard/summaries?limit=1&offset=0") return json(firstPage);
+      if (url.startsWith("/api/dashboard/rubro-reconciliation-chart")) return json(rubroChart);
       if (url.startsWith("/api/dashboard/system-drilldown")) {
         const response = structuredClone(drilldown);
         const code = new URL(url, "https://example.test").searchParams.get("cost_center_code") || "190";
@@ -152,16 +174,13 @@ describe("sesión y vistas de presentación", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/system-drilldown?cost_center_code=190", expect.objectContaining({ credentials: "include" })));
   });
 
-  it("renderiza solamente la página agrupada solicitada al avanzar y regresar", async () => {
-    const firstPage: PaginatedDrilldownFixture = structuredClone(drilldown);
-    firstPage.groups[0].rubro = "Rubro inicial";
-    firstPage.page = { limit: 1, offset: 0, has_more: true, total_count: 2 };
-    const secondPage: PaginatedDrilldownFixture = structuredClone(drilldown);
-    secondPage.groups[0].rubro = "Rubro siguiente";
-    secondPage.page = { limit: 1, offset: 1, has_more: false, total_count: 2 };
+  it("mantiene la paginación del servidor junto al gráfico principal", async () => {
+    const firstPage = { ...structuredClone(drilldown), page: { limit: 1, offset: 0, has_more: true, total_count: 2 } };
+    const secondPage = { ...structuredClone(drilldown), page: { limit: 1, offset: 1, has_more: false, total_count: 2 } };
     const fetchMock = vi.fn((url: string) => {
       if (url === "/api/auth/me") return json(viewer);
       if (url === "/api/dashboard/summaries") return json(summary);
+      if (url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=190") return json(rubroChart);
       if (url === "/api/dashboard/system-drilldown?cost_center_code=190") return json(firstPage);
       if (url === "/api/dashboard/system-drilldown?cost_center_code=190&limit=1&offset=1") return json(secondPage);
       if (url === "/api/dashboard/system-drilldown?cost_center_code=190&limit=1&offset=0") return json(firstPage);
@@ -169,21 +188,11 @@ describe("sesión y vistas de presentación", () => {
     });
     vi.stubGlobal("fetch", fetchMock); render(<App />);
 
-    const firstNavigation = await screen.findByRole("navigation", { name: "Paginación del detalle de conciliación" });
-    expect(screen.getByText("Rubro · Rubro inicial")).toBeInTheDocument();
-    expect(within(firstNavigation).getByRole("button", { name: "Anterior" })).toBeDisabled();
-    fireEvent.click(within(firstNavigation).getByRole("button", { name: "Siguiente" }));
-
-    expect(await screen.findByText("Rubro · Rubro siguiente")).toBeInTheDocument();
-    expect(screen.queryByText("Rubro · Rubro inicial")).not.toBeInTheDocument();
+    const navigation = await screen.findByRole("navigation", { name: "Paginación del gráfico principal de conciliación" });
+    expect(screen.queryByRole("navigation", { name: "Paginación del detalle de conciliación" })).not.toBeInTheDocument();
+    expect(within(navigation).getByRole("button", { name: "Anterior" })).toBeDisabled();
+    fireEvent.click(within(navigation).getByRole("button", { name: "Siguiente" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/system-drilldown?cost_center_code=190&limit=1&offset=1", expect.objectContaining({ credentials: "include" })));
-    const secondNavigation = screen.getByRole("navigation", { name: "Paginación del detalle de conciliación" });
-    expect(within(secondNavigation).getByRole("button", { name: "Siguiente" })).toBeDisabled();
-    fireEvent.click(within(secondNavigation).getByRole("button", { name: "Anterior" }));
-
-    expect(await screen.findByText("Rubro · Rubro inicial")).toBeInTheDocument();
-    expect(screen.queryByText("Rubro · Rubro siguiente")).not.toBeInTheDocument();
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/system-drilldown?cost_center_code=190&limit=1&offset=0", expect.objectContaining({ credentials: "include" })));
   });
 
   it("oculta semánticamente la navegación móvil cerrada y la restaura al abrirla", async () => {
@@ -233,7 +242,7 @@ describe("sesión y vistas de presentación", () => {
     expect(screen.getByText("Los estados y las diferencias se calculan sobre activos distintos del lote de sistema seleccionado. Los estados de auditoría son proyecciones del lote de auditoría seleccionado. Los KPI y gráficos se calculan únicamente en el servidor.")).toBeInTheDocument();
     expect(screen.queryByText(summary.metric_scope)).not.toBeInTheDocument();
 
-    expect(await screen.findByText(/Activo · 1/)).toBeInTheDocument();
+    expect(await screen.findByRole("img", { name: "Barras agrupadas de conciliación por categoría" })).toBeInTheDocument();
     expect(screen.queryByText("Active")).not.toBeInTheDocument();
     expect(screen.getByText("Casos pendientes de revisión")).toBeInTheDocument();
     expect(screen.getByText("Casos de auditoría sin resolver")).toBeInTheDocument();
@@ -266,12 +275,87 @@ describe("sesión y vistas de presentación", () => {
     expect(screen.queryByText("return_event_time_evidence_unavailable")).not.toBeInTheDocument();
   });
 
-  it("renderiza el gráfico agrupado y las etiquetas nulas como sin asignar", async () => {
+  it("renderiza las barras agrupadas con las etiquetas y valores que entrega el servidor", async () => {
     installFetch(); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
-    expect(await screen.findByRole("img", { name: "Barras apiladas de conciliación por categoría" })).toBeInTheDocument();
-    expect(screen.getByText("Rubro · Sin rubro asignado")).toBeInTheDocument();
-    expect(screen.getByText("Sin categoría asignada")).toBeInTheDocument();
-    expect(screen.getByText("Sin producto asignado")).toBeInTheDocument();
+    expect(await screen.findByRole("img", { name: "Barras agrupadas de conciliación por categoría" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Sin rubro asignado" })).toBeInTheDocument();
+    await waitFor(() => expect(setOptionMock).toHaveBeenCalledWith(expect.objectContaining({
+      yAxis: expect.objectContaining({ data: ["Sin categoría asignada", "Muebles"] }),
+      series: [expect.objectContaining({ data: [7, 4] }), expect.objectContaining({ data: [3, 1] }), expect.objectContaining({ data: [2, 5] })],
+    })));
+    expect(screen.queryByRole("table", { name: /detalle/i })).not.toBeInTheDocument();
+  });
+
+  it("codifica rubros nombrados y representa la selección nula explícita", async () => {
+    const fetchMock = installFetch(); render(<App />);
+    const rubroSelector = await screen.findByLabelText("Rubro");
+    fireEvent.change(rubroSelector, { target: { value: "" } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=", expect.objectContaining({ credentials: "include" })));
+    fireEvent.change(await screen.findByLabelText("Rubro"), { target: { value: "Rubro & Ácento" } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=Rubro%20%26%20%C3%81cento", expect.objectContaining({ credentials: "include" })));
+  });
+
+  it("muestra los estados localizados del contrato de rubro y no expone motivos crudos", async () => {
+    const unavailable = structuredClone(rubroChart);
+    unavailable.rubro_options = [];
+    unavailable.selected_rubro = null;
+    unavailable.category_chart = { ...unavailable.category_chart, available: false, reason: "missing_system_evidence", items: [] };
+    installFetch(viewer, { rubroChart: unavailable }); const systemView = render(<App />);
+    expect(await screen.findByText("No hay evidencia vigente de sistema para mostrar rubros y categorías.")).toBeInTheDocument();
+    expect(screen.queryByText("missing_system_evidence")).not.toBeInTheDocument();
+    systemView.unmount();
+
+    const auditUnavailable = structuredClone(rubroChart);
+    auditUnavailable.category_chart = { ...auditUnavailable.category_chart, available: false, reason: "missing_audit_evidence", items: [] };
+    installFetch(viewer, { rubroChart: auditUnavailable }); const auditView = render(<App />);
+    expect(await screen.findByText("No hay evidencia vigente de auditoría para conciliar las categorías seleccionadas.")).toBeInTheDocument();
+    auditView.unmount();
+
+    const invalid = structuredClone(rubroChart);
+    invalid.category_chart = { ...invalid.category_chart, available: false, reason: "invalid_rubro_selection", items: [] };
+    installFetch(viewer, { rubroChart: invalid }); const invalidView = render(<App />);
+    expect(await screen.findByText("El rubro seleccionado ya no está disponible para este centro de costo.")).toBeInTheDocument();
+    expect(screen.queryByText("invalid_rubro_selection")).not.toBeInTheDocument();
+    invalidView.unmount();
+
+    const empty = structuredClone(rubroChart);
+    empty.category_chart = { ...empty.category_chart, available: false, reason: "empty_rubro", items: [] };
+    installFetch(viewer, { rubroChart: empty }); render(<App />);
+    expect(await screen.findByText("El rubro seleccionado no tiene categorías para mostrar.")).toBeInTheDocument();
+  });
+
+  it("muestra un error seguro al cargar el gráfico de rubro", async () => {
+    const fetchMock = installFetch();
+    fetchMock.mockImplementation((url: string) => url === "/api/auth/me" ? json(viewer) : url === "/api/dashboard/summaries" ? json(summary) : url.startsWith("/api/dashboard/rubro-reconciliation-chart") ? json({ detail: "raw chart outage" }, 503) : url.startsWith("/api/dashboard/system-drilldown") ? json(drilldown) : json({}, 404));
+    render(<App />);
+    expect(await screen.findByText("No se pudo completar la solicitud. Intente nuevamente.")).toBeInTheDocument();
+    expect(screen.queryByText("raw chart outage")).not.toBeInTheDocument();
+  });
+
+  it("muestra carga, protege contra respuestas obsoletas y no conserva el gráfico anterior", async () => {
+    const multipleSummaries = structuredClone(summary);
+    multipleSummaries.summaries.push({ ...structuredClone(summary.summaries[0]), cost_center: { code: "191", name: "Centro secundario" } });
+    let resolveFirstChart: (response: Response) => void = () => undefined;
+    const firstChart = new Promise<Response>((resolve) => { resolveFirstChart = resolve; });
+    const fetchMock = vi.fn((url: string) => {
+      if (url === "/api/auth/me") return json(viewer);
+      if (url === "/api/dashboard/summaries") return json(multipleSummaries);
+      if (url.startsWith("/api/dashboard/system-drilldown")) return json(drilldown);
+      if (url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=190") return firstChart;
+      if (url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=191") return json(rubroChart);
+      return json({}, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock); render(<App />);
+    const centerSelector = await screen.findByLabelText("Centro de costo");
+    expect(await screen.findByText("Cargando categorías del rubro…")).toBeInTheDocument();
+    fireEvent.change(centerSelector, { target: { value: "191" } });
+    expect(screen.queryByRole("img", { name: "Barras agrupadas de conciliación por categoría" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("img", { name: "Barras agrupadas de conciliación por categoría" })).toBeInTheDocument();
+    const stale = structuredClone(rubroChart);
+    stale.rubro_options = [{ value: "Obsoleto", label: "Obsoleto" }];
+    stale.selected_rubro = stale.rubro_options[0];
+    resolveFirstChart(await json(stale));
+    await waitFor(() => expect(screen.queryByRole("option", { name: "Obsoleto" })).not.toBeInTheDocument());
   });
 
   it("muestra un error localizado sin exponer el detalle crudo del servidor", async () => {
