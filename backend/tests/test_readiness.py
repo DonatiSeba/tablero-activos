@@ -1,8 +1,27 @@
 import asyncio
 import json
 
+import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session, sessionmaker
+
 from backend.app import main
 from backend.app import readiness
+
+
+class TrackingSession(Session):
+    """Record session cleanup while retaining real SQLAlchemy behavior."""
+
+    instances: list["TrackingSession"] = []
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.closed = False
+        self.__class__.instances.append(self)
+
+    def close(self) -> None:
+        self.closed = True
+        super().close()
 
 
 def _request(path: str) -> tuple[int, dict[str, str]]:
@@ -59,6 +78,35 @@ def test_readiness_requires_database_and_evidence_storage(monkeypatch) -> None:
 
     assert readiness.is_ready() is True
     assert calls == ["database", "storage"]
+
+
+def test_database_readiness_uses_and_closes_a_session_from_the_factory(monkeypatch) -> None:
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR NOT NULL)"))
+        connection.execute(text("INSERT INTO alembic_version (version_num) VALUES ('head')"))
+    TrackingSession.instances = []
+    factory = sessionmaker(bind=engine, class_=TrackingSession)
+    monkeypatch.setattr(readiness, "_session_factory", lambda: factory)
+    monkeypatch.setattr(readiness, "_alembic_head_revision", lambda: "head")
+
+    readiness._check_database()
+
+    assert len(TrackingSession.instances) == 1
+    assert TrackingSession.instances[0].closed is True
+
+
+def test_database_readiness_closes_session_when_the_probe_fails(monkeypatch) -> None:
+    engine = create_engine("sqlite://")
+    TrackingSession.instances = []
+    factory = sessionmaker(bind=engine, class_=TrackingSession)
+    monkeypatch.setattr(readiness, "_session_factory", lambda: factory)
+
+    with pytest.raises(readiness.ReadinessFailure):
+        readiness._check_database()
+
+    assert len(TrackingSession.instances) == 1
+    assert TrackingSession.instances[0].closed is True
 
 
 def test_readiness_fails_closed_when_a_dependency_check_fails(monkeypatch) -> None:

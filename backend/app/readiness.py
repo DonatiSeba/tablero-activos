@@ -26,16 +26,17 @@ def _alembic_head_revision() -> str:
 
 def _check_database() -> None:
     """Bounded-check connectivity and require the database to be at Alembic head."""
-    engine = _session_factory().get_bind()
+    session = _session_factory()()
     try:
-        with engine.connect() as connection:
-            # The engine also uses a bounded connect/pool timeout.  Bound SQL work here.
-            if connection.dialect.name == "postgresql":
-                connection.execute(text("SET LOCAL statement_timeout = '3000ms'"))
-            connection.execute(text("SELECT 1"))
-            revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one_or_none()
+        # The engine also uses a bounded connect/pool timeout.  Bound SQL work here.
+        if session.get_bind().dialect.name == "postgresql":
+            session.execute(text("SET LOCAL statement_timeout = '3000ms'"))
+        session.execute(text("SELECT 1"))
+        revision = session.execute(text("SELECT version_num FROM alembic_version")).scalar_one_or_none()
     except Exception as error:
         raise ReadinessFailure from error
+    finally:
+        session.close()
 
     if revision != _alembic_head_revision():
         raise ReadinessFailure
