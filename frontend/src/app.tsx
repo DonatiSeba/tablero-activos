@@ -3,9 +3,12 @@ import * as echarts from "echarts";
 import type { EChartsOption } from "echarts";
 
 export type Role = "viewer" | "editor" | "admin";
-export type CurrentUser = { id: string; username: string; display_name: string; role: Role };
+export type CurrentUser = { id: string; username: string; display_name: string; role: Role; must_change_password: boolean };
 type ApiError = { status?: number };
 type Page = { limit: number; offset: number; has_more: boolean; total_count: number };
+type ManagedUser = CurrentUser & { email: string; is_active: boolean; created_at: string; updated_at: string };
+type UserListResponse = { items: ManagedUser[]; total: number; limit: number; offset: number };
+type TemporaryPasswordResponse = ManagedUser & { temporary_password: string };
 type CostCenter = { code: string; name: string };
 type Source = { source: "system" | "audit"; available: boolean; batch_id: string | null; report_date: string | null };
 type Freshness = { warning: boolean; status: string; message: string | null };
@@ -68,7 +71,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 function publicError(error: ApiError) {
   if (error.status === 401) return "La sesión no está disponible. Inicie sesión nuevamente.";
   if (error.status === 403) return "No tiene permiso para realizar esta acción.";
+  if (error.status === 409) return "La acción entra en conflicto con otro usuario o con las protecciones de administradores activos.";
+  if (error.status === 400 || error.status === 422) return "Revise los datos ingresados e intente nuevamente.";
   return "No se pudo completar la solicitud. Intente nuevamente.";
+}
+function passwordError(error: ApiError) {
+  if (error.status === 400) return "La contraseña actual no es correcta o la nueva contraseña no cumple los requisitos.";
+  if (error.status === 422) return "La nueva contraseña debe tener al menos 12 caracteres y ser diferente de la actual.";
+  return publicError(error);
 }
 function ErrorNotice({ error }: { error: string | null }) { return error ? <p className="notice error" role="alert">{error}</p> : null; }
 function Empty({ children }: { children: ReactNode }) { return <p className="empty">{children}</p>; }
@@ -136,18 +146,17 @@ function EChart({ option, ariaLabel }: { option: EChartsOption; ariaLabel: strin
   return <div className="chart" role="img" aria-label={ariaLabel} ref={element} />;
 }
 
-function Metric({ label, value, tone = "blue" }: { label: string; value: number | null; tone?: "blue" | "green" | "cyan" | "red" | "yellow" }) {
-  return <div className={`metric metric-${tone}`}><dt>{label}</dt><dd>{number(value)}</dd></div>;
+const metricIcons = { blue: "▤", green: "✓", cyan: "↩", red: "!", yellow: "◎" } as const;
+function Metric({ label, value, tone = "blue", description }: { label: string; value: number | null; tone?: keyof typeof metricIcons; description?: string }) {
+  return <div className={`metric metric-${tone}`}><div className="metric-top"><dt>{label}</dt><span className="metric-icon" aria-hidden="true">{metricIcons[tone]}</span></div><dd>{number(value)}</dd>{description && <span className="metric-description">{description}</span>}<span className="metric-accent" aria-hidden="true" /></div>;
 }
 function Kpis({ metrics }: { metrics: ExecutiveMetrics }) {
-  return <dl className="metrics">
-    <Metric label="En sistema" value={metrics.system_count} />
-    <Metric label="Encontrados en CC" value={metrics.found_in_cost_center_count} tone="green" />
-    <Metric label="Retornados" value={metrics.returned_count} tone="cyan" />
-    <Metric label="Contabilizados" value={metrics.accounted_count} tone="green" />
-    <Metric label="Diferencia pendiente" value={metrics.difference_count} tone="red" />
-    <div className="metric metric-yellow"><dt>Cobertura</dt><dd>{percentage(metrics.coverage_percent)}</dd></div>
-  </dl>;
+  return <><dl className="metrics executive-metrics">
+    <Metric label="En sistema" value={metrics.system_count} description="Activos registrados en el corte" />
+    <Metric label="Encontrados en CC" value={metrics.found_in_cost_center_count} tone="green" description="Evidencia física seleccionada" />
+    <Metric label="Retornados" value={metrics.returned_count} tone="cyan" description="Estado inferido por el servidor" />
+    <Metric label="Diferencia pendiente" value={metrics.difference_count} tone="red" description="Activos aún sin justificar" />
+  </dl><dl className="supporting-metrics" aria-label="Indicadores complementarios"><div><dt>Contabilizados</dt><dd>{number(metrics.accounted_count)}</dd></div><div><dt>Cobertura</dt><dd>{percentage(metrics.coverage_percent)}</dd></div></dl></>;
 }
 function Donut({ chart }: { chart: DonutChart }) {
   if (!chart.available) return <Empty>{chartReason(chart.reason)}</Empty>;
@@ -197,7 +206,7 @@ function SourceDates({ system, audit, freshness }: { system: Source; audit: Sour
   </>;
 }
 function OperationalIssues({ issues }: { issues: OperationalIssues }) {
-  return <section className="issues" aria-labelledby="issues-heading"><h3 id="issues-heading">Inconsistencias operativas</h3><div className="issue-grid">
+  return <section className="panel issues" aria-labelledby="issues-heading"><div className="panel-heading"><div><h2 id="issues-heading">Inconsistencias operativas</h2><p>Alertas diferenciadas por el servidor</p></div><span className="chip chip-warning">Revisión</span></div><div className="issue-grid">
     <Metric label="Diferencia física o patrimonial" value={issues.physical_patrimonial_difference_count} tone="red" />
     <Metric label="Retornos pendientes de actualización" value={issues.system_update_required_return_count} tone="cyan" />
     <Metric label="Casos pendientes de revisión" value={issues.review_required_count} tone="yellow" />
@@ -206,43 +215,119 @@ function OperationalIssues({ issues }: { issues: OperationalIssues }) {
   </div></section>;
 }
 
+function Coverage({ value }: { value: number | null }) {
+  return <div className="coverage"><span className="coverage-track" aria-hidden="true"><span style={{ width: value === null ? "0%" : `${Math.max(0, Math.min(100, value))}%` }} /></span><span>{percentage(value)}</span></div>;
+}
+function ReconciliationTable({ groups }: { groups: DrilldownResponse["groups"] }) {
+  return <div className="table-scroll reconciliation-table"><table><thead><tr><th>Jerarquía</th><th>En sistema</th><th>En CC</th><th>Retornados</th><th>Contabilizados</th><th>Diferencia</th><th>Cobertura</th></tr></thead><tbody>{groups.flatMap((rubro) => {
+    const rubroKey = String(rubro.rubro);
+    const rubroRows = [<tr className="rubro-row" key={`${rubroKey}-rubro`}><td><strong>Rubro · {hierarchyLabel(rubro.rubro, "rubro")}</strong></td><MetricCells metrics={rubro.reconciliation_metrics} /></tr>];
+    const categoryRows = rubro.categories.flatMap((category) => {
+      const categoryKey = `${rubroKey}-${String(category.category)}`;
+      return [<tr className="category-row" key={`${categoryKey}-category`}><td><span className="tree-mark" aria-hidden="true">↳</span><strong>{hierarchyLabel(category.category, "categoría")}</strong></td><MetricCells metrics={category.reconciliation_metrics} /></tr>, ...category.products.map((product) => <tr className="product-row" key={`${categoryKey}-${String(product.product)}`}><td><span className="tree-mark" aria-hidden="true">↳</span><div><span>{hierarchyLabel(product.product, "producto")}</span><small>{number(product.distinct_asset_count)} activos · {number(product.observation_count)} observaciones</small><div className="status-list">{product.status_counts.map((item) => <span className="status" key={String(item.status)}>{statusLabel(item.status)} · {number(item.count)}</span>)}</div></div></td><MetricCells metrics={product.reconciliation_metrics} /></tr>)];
+    });
+    return [...rubroRows, ...categoryRows];
+  })}</tbody></table></div>;
+}
+function MetricCells({ metrics }: { metrics: ExecutiveMetrics }) {
+  return <><td className="num">{number(metrics.system_count)}</td><td className="num">{number(metrics.found_in_cost_center_count)}</td><td className="num">{number(metrics.returned_count)}</td><td className="num">{number(metrics.accounted_count)}</td><td className="num difference-value">{number(metrics.difference_count)}</td><td><Coverage value={metrics.coverage_percent} /></td></>;
+}
+
+function ServerPagination({ page, busy, label, onNavigate }: { page: Page; busy: boolean; label: string; onNavigate: (offset: number, limit: number) => void }) {
+  const pageNumber = Math.floor(page.offset / page.limit) + 1;
+  const pageCount = Math.max(1, Math.ceil(page.total_count / page.limit));
+  return <nav className="pagination dashboard-pagination" aria-label={label}>
+    <button type="button" className="button-secondary" disabled={busy || page.offset === 0} onClick={() => onNavigate(Math.max(0, page.offset - page.limit), page.limit)}>Anterior</button>
+    <span aria-live="polite">Página {pageNumber} de {pageCount}</span>
+    <button type="button" className="button-secondary" disabled={busy || !page.has_more} onClick={() => onNavigate(page.offset + page.limit, page.limit)}>Siguiente</button>
+  </nav>;
+}
+
 function Dashboard() {
   const [data, setData] = useState<SummariesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const summaryRequestInFlight = useRef(false);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
+  const selectedCodeRef = useRef<string | null>(null);
   const [drilldown, setDrilldown] = useState<DrilldownResponse | null>(null);
   const [drilldownError, setDrilldownError] = useState<string | null>(null);
-  useEffect(() => { request<SummariesResponse>("/dashboard/summaries").then(setData).catch((e: ApiError) => setError(publicError(e))); }, []);
-  function showDrilldown(code: string) {
-    setSelectedCode(code); setDrilldown(null); setDrilldownError(null);
-    request<DrilldownResponse>(`/dashboard/system-drilldown?cost_center_code=${encodeURIComponent(code)}`).then(setDrilldown).catch((e: ApiError) => setDrilldownError(publicError(e)));
+  const [drilldownLoading, setDrilldownLoading] = useState(false);
+  const [drilldownRequest, setDrilldownRequest] = useState<{ offset: number; limit: number } | null>(null);
+
+  function selectCenter(code: string | null) {
+    selectedCodeRef.current = code;
+    setSelectedCode(code);
+    setDrilldownRequest(null);
+    setDrilldown(null);
+    setDrilldownError(null);
   }
+
+  async function loadSummaryPage(page?: { offset: number; limit: number }) {
+    if (summaryRequestInFlight.current) return;
+    summaryRequestInFlight.current = true;
+    setSummaryLoading(true);
+    setError(null);
+    const path = page ? `/dashboard/summaries?limit=${page.limit}&offset=${page.offset}` : "/dashboard/summaries";
+    try {
+      const response = await request<SummariesResponse>(path);
+      const current = selectedCodeRef.current;
+      const next = response.summaries.some((summary) => summary.cost_center.code === current)
+        ? current
+        : response.summaries[0]?.cost_center.code || null;
+      setData(response);
+      if (next !== current) selectCenter(next);
+    } catch (e) {
+      setError(publicError(e as ApiError));
+    } finally {
+      summaryRequestInFlight.current = false;
+      setSummaryLoading(false);
+    }
+  }
+
+  useEffect(() => { void loadSummaryPage(); }, []);
+  useEffect(() => {
+    if (!selectedCode) return;
+    let active = true;
+    setDrilldownLoading(true);
+    setDrilldown(null);
+    setDrilldownError(null);
+    const pagination = drilldownRequest ? `&limit=${drilldownRequest.limit}&offset=${drilldownRequest.offset}` : "";
+    request<DrilldownResponse>(`/dashboard/system-drilldown?cost_center_code=${encodeURIComponent(selectedCode)}${pagination}`).then((response) => {
+      if (active) setDrilldown(response);
+    }).catch((e: ApiError) => {
+      if (active) setDrilldownError(publicError(e));
+    }).finally(() => {
+      if (active) setDrilldownLoading(false);
+    });
+    return () => { active = false; };
+  }, [selectedCode, drilldownRequest]);
+
+  function navigateDrilldown(offset: number, limit: number) {
+    if (drilldownLoading) return;
+    setDrilldownLoading(true);
+    setDrilldown(null);
+    setDrilldownError(null);
+    setDrilldownRequest({ offset, limit });
+  }
+
+  const selected = data?.summaries.find((summary) => summary.cost_center.code === selectedCode) || null;
   return <section aria-labelledby="dashboard-heading">
-    <div className="page-heading"><div><p className="eyebrow">Dirección ejecutiva</p><h1 id="dashboard-heading">Control de activos</h1><p className="muted">Resumen de conciliación calculado y seleccionado por el servidor.</p></div></div>
+    <div className="dashboard-topbar"><div className="title-wrap"><p className="eyebrow">Dirección ejecutiva</p><h1 id="dashboard-heading">Conciliación de activos</h1><p>{selected ? `Resumen ejecutivo · Centro de costo ${selected.cost_center.code}` : "Resumen ejecutivo por centro de costo"}</p></div>{data && data.summaries.length > 0 && <label className="cost-center-select">Centro de costo<select value={selectedCode || ""} disabled={summaryLoading} onChange={(event) => selectCenter(event.target.value)}>{data.summaries.map((summary) => <option value={summary.cost_center.code} key={summary.cost_center.code}>CC {summary.cost_center.code} · {summary.cost_center.name}</option>)}</select></label>}</div>
     <ErrorNotice error={error} />
-    {!data && !error && <p role="status" className="loading">Cargando resumen ejecutivo…</p>}
+    {!data && !error && <div className="loading-card" role="status">Cargando resumen ejecutivo…</div>}
     {data?.summaries.length === 0 && <Empty>No hay centros de costo disponibles para esta sesión.</Empty>}
-    <div className="summary-grid">
-      {data?.summaries.map((summary) => <article className="summary-card" key={summary.cost_center.code}>
-        <header><div><p className="card-overline">Centro de costo {summary.cost_center.code}</p><h2>{summary.cost_center.name}</h2></div><button className="button-secondary" type="button" onClick={() => showDrilldown(summary.cost_center.code)}>Ver análisis</button></header>
-        <SourceDates system={summary.latest_sources.system} audit={summary.latest_sources.audit} freshness={summary.freshness} />
-        <Kpis metrics={summary.executive_metrics} />
-        <div className="summary-chart"><h3>Estado general</h3><Donut chart={summary.charts.general_status_donut} /></div>
-        <div className="summary-chart"><h3>Evolución temporal</h3><Evolution chart={summary.charts.time_evolution} /></div>
-      </article>)}
-    </div>
-    {data?.page.has_more && <p className="notice" role="status">Hay más centros de costo disponibles en el servidor. Esta vista muestra la página actual.</p>}
-    {data && <p className="muted small">{metricScopeLabel(data.metric_scope)}</p>}
-    {selectedCode && <section className="drilldown panel" aria-labelledby="drilldown-heading"><div className="panel-heading"><div><p className="eyebrow">Detalle agrupado</p><h2 id="drilldown-heading">Conciliación por rubro y categoría: CC {selectedCode}</h2></div></div><ErrorNotice error={drilldownError} />
-      {!drilldown && !drilldownError && <p role="status" className="loading">Cargando datos agrupados…</p>}
-      {drilldown && !drilldown.cost_center && <Empty>No se encontró el centro de costo seleccionado.</Empty>}
-      {drilldown?.executive_metrics && <Kpis metrics={drilldown.executive_metrics} />}
-      {drilldown?.operational_issues && <OperationalIssues issues={drilldown.operational_issues} />}
-      {drilldown && <div className="chart-grid"><section className="chart-panel"><h3>Conciliación por categoría</h3><StackedBars chart={drilldown.charts.primary_stacked_bar} /></section><section className="chart-panel"><h3>Composición del estado</h3><Donut chart={drilldown.charts.general_status_donut} /></section></div>}
-      {drilldown?.groups.length === 0 && <Empty>No hay evidencia de sistema agrupada para este centro de costo.</Empty>}
-      {drilldown?.groups.map((rubro) => <section className="group" key={String(rubro.rubro)}><h3>Rubro: {hierarchyLabel(rubro.rubro, "rubro")}</h3><dl className="group-metrics"><Metric label="En sistema" value={rubro.reconciliation_metrics.system_count} /><Metric label="Diferencia" value={rubro.reconciliation_metrics.difference_count} tone="red" /></dl>{rubro.categories.map((category) => <div className="category" key={String(category.category)}><h4>Categoría: {hierarchyLabel(category.category, "categoría")}</h4><ul>{category.products.map((product) => <li key={String(product.product)}><strong>{hierarchyLabel(product.product, "producto")}</strong><span>{number(product.distinct_asset_count)} activos distintos · {number(product.observation_count)} observaciones</span><span className="muted">Estados: {product.status_counts.map((item) => `${statusLabel(item.status)} (${number(item.count)})`).join(", ") || "Sin estados informados"}</span></li>)}</ul></div>)}</section>)}
-      {drilldown?.page.has_more && <p className="notice" role="status">Hay más grupos disponibles en el servidor. Los gráficos reflejan únicamente la página agrupada actual.</p>}
-    </section>}
+    {data && <ServerPagination page={data.page} busy={summaryLoading} label="Paginación de centros de costo" onNavigate={(offset, limit) => void loadSummaryPage({ offset, limit })} />}
+    {selected && <>
+      <section className="context-card" aria-label="Contexto del centro de costo"><div><span>Centro seleccionado</span><strong>CC {selected.cost_center.code} · {selected.cost_center.name}</strong></div><SourceDates system={selected.latest_sources.system} audit={selected.latest_sources.audit} freshness={selected.freshness} /></section>
+      <Kpis metrics={selected.executive_metrics} />
+      <ErrorNotice error={drilldownError} />
+      {!drilldown && !drilldownError && <div className="loading-card" role="status">Cargando conciliación agrupada…</div>}
+      <div className="dashboard-grid dashboard-grid-primary"><section className="panel chart-panel"><div className="panel-heading"><div><h2>Conciliación por rubro y categoría</h2><p>Encontrados, retornados y diferencia del corte seleccionado</p></div><span className="chip">Último corte</span></div>{drilldown ? <StackedBars chart={drilldown.charts.primary_stacked_bar} /> : <div className="chart-placeholder" />}</section><section className="panel chart-panel"><div className="panel-heading"><div><h2>Estado general</h2><p>Composición informada por el servidor</p></div><span className="chip">{percentage(selected.executive_metrics.coverage_percent)} cobertura</span></div><Donut chart={drilldown?.charts.general_status_donut || selected.charts.general_status_donut} /></section></div>
+      <div className="dashboard-grid"><section className="panel chart-panel"><div className="panel-heading"><div><h2>Evolución temporal</h2><p>Instantáneas comparables del centro seleccionado</p></div><span className="chip">Histórico</span></div><Evolution chart={selected.charts.time_evolution} /></section><OperationalIssues issues={drilldown?.operational_issues || selected.operational_issues} /></div>
+      <section className="panel hierarchy-panel" aria-labelledby="hierarchy-heading"><div className="panel-heading"><div><h2 id="hierarchy-heading">Detalle de conciliación</h2><p>Rubro → Categoría → Producto · métricas calculadas por el servidor</p></div><span className="chip">Agrupado</span></div>{drilldown?.groups.length === 0 && <Empty>No hay evidencia de sistema agrupada para este centro de costo.</Empty>}{drilldown && drilldown.groups.length > 0 && <ReconciliationTable groups={drilldown.groups} />}{drilldown && <ServerPagination page={drilldown.page} busy={drilldownLoading} label="Paginación del detalle de conciliación" onNavigate={navigateDrilldown} />}</section>
+    </>}
+    {data && <p className="metric-scope">{metricScopeLabel(data.metric_scope)}</p>}
   </section>;
 }
 
@@ -274,13 +359,98 @@ function Uploads() {
   </div></section>;
 }
 
+const managedRoles: { value: Role; label: string }[] = [
+  { value: "viewer", label: "Viewer" },
+  { value: "editor", label: "Editor" },
+  { value: "admin", label: "Admin" },
+];
+function TemporaryPasswordPanel({ result, onClose }: { result: { displayName: string; password: string }; onClose: () => void }) {
+  const [copyStatus, setCopyStatus] = useState<string | null>(null);
+  async function copyPassword() {
+    try { await navigator.clipboard.writeText(result.password); setCopyStatus("Contraseña copiada."); }
+    catch { setCopyStatus("No se pudo copiar. Seleccione la contraseña y cópiela manualmente."); }
+  }
+  return <section className="temporary-password" aria-labelledby="temporary-password-heading" role="status"><div><p className="eyebrow">Credencial temporal</p><h2 id="temporary-password-heading">Contraseña para {result.displayName}</h2><p>Se muestra una sola vez. Entréguela por un canal seguro; la persona deberá cambiarla al ingresar.</p><output aria-label="Contraseña temporal">{result.password}</output>{copyStatus && <p aria-live="polite">{copyStatus}</p>}</div><div className="temporary-password-actions"><button className="button-secondary" type="button" onClick={() => void copyPassword()}>Copiar contraseña</button><button className="button-secondary" type="button" onClick={onClose}>Cerrar y ocultar</button></div></section>;
+}
+function Users({ currentUser, onCurrentUserUpdated }: { currentUser: CurrentUser; onCurrentUserUpdated: (user: CurrentUser) => void }) {
+  const pageSize = 20;
+  const [data, setData] = useState<UserListResponse | null>(null); const [offset, setOffset] = useState(0); const [error, setError] = useState<string | null>(null); const [busy, setBusy] = useState(false); const [editing, setEditing] = useState<ManagedUser | null>(null); const [temporary, setTemporary] = useState<{ displayName: string; password: string } | null>(null);
+  async function load(pageOffset = offset) {
+    setData(null); setError(null);
+    try { setData(await request<UserListResponse>(`/users?limit=${pageSize}&offset=${pageOffset}`)); }
+    catch (e) { setError(publicError(e as ApiError)); }
+  }
+  useEffect(() => { void load(offset); }, [offset]);
+  async function createUser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form = event.currentTarget; const values = new FormData(form); setBusy(true); setError(null); setTemporary(null);
+    try {
+      const created = await request<TemporaryPasswordResponse>("/users", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: values.get("username"), email: values.get("email"), display_name: values.get("display_name"), role: values.get("role") }) });
+      form.reset(); setTemporary({ displayName: created.display_name, password: created.temporary_password }); await load(offset);
+    } catch (e) { setError(publicError(e as ApiError)); } finally { setBusy(false); }
+  }
+  async function saveUser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (!editing) return; const values = new FormData(event.currentTarget); setBusy(true); setError(null);
+    try {
+      const updated = await request<ManagedUser>(`/users/${editing.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: values.get("username"), email: values.get("email"), display_name: values.get("display_name"), role: values.get("role") }) });
+      setEditing(null); if (updated.id === currentUser.id) onCurrentUserUpdated({ id: updated.id, username: updated.username, display_name: updated.display_name, role: updated.role, must_change_password: updated.must_change_password }); await load(offset);
+    } catch (e) { setError(publicError(e as ApiError)); } finally { setBusy(false); }
+  }
+  async function setActive(user: ManagedUser) {
+    setBusy(true); setError(null);
+    try { await request<ManagedUser>(`/users/${user.id}/${user.is_active ? "disable" : "enable"}`, { method: "POST" }); await load(offset); }
+    catch (e) { setError(publicError(e as ApiError)); } finally { setBusy(false); }
+  }
+  async function resetPassword(user: ManagedUser) {
+    setBusy(true); setError(null); setTemporary(null);
+    try { const result = await request<TemporaryPasswordResponse>(`/users/${user.id}/reset-password`, { method: "POST" }); setTemporary({ displayName: result.display_name, password: result.temporary_password }); await load(offset); }
+    catch (e) { setError(publicError(e as ApiError)); } finally { setBusy(false); }
+  }
+  const first = data && data.total > 0 ? data.offset + 1 : 0; const last = data ? Math.min(data.offset + data.items.length, data.total) : 0;
+  return <section aria-labelledby="users-heading"><div className="page-heading"><div><p className="eyebrow">Administración</p><h1 id="users-heading">Usuarios</h1><p className="muted">Gestione perfiles y asigne uno de los roles fijos. La autorización siempre se valida en el servidor.</p></div></div><ErrorNotice error={error} />
+    {temporary && <TemporaryPasswordPanel result={temporary} onClose={() => setTemporary(null)} />}
+    <div className="user-management-grid"><form className="panel user-form" onSubmit={createUser}><h2>Crear usuario</h2><label>Nombre para mostrar <input name="display_name" required maxLength={255} /></label><label>Usuario <input name="username" required maxLength={128} autoComplete="off" /></label><label>Correo electrónico <input name="email" type="email" required maxLength={320} autoComplete="off" /></label><label>Rol<select name="role" defaultValue="viewer">{managedRoles.map((role) => <option key={role.value} value={role.value}>{role.label}</option>)}</select></label><button className="button-primary" disabled={busy}>Crear usuario</button></form>
+      {editing && <form className="panel user-form" onSubmit={saveUser}><div className="form-heading"><h2>Editar usuario</h2><button className="text-button" type="button" onClick={() => setEditing(null)}>Cancelar</button></div><label>Nombre para mostrar <input name="display_name" defaultValue={editing.display_name} required maxLength={255} /></label><label>Usuario <input name="username" defaultValue={editing.username} required maxLength={128} /></label><label>Correo electrónico <input name="email" type="email" defaultValue={editing.email} required maxLength={320} /></label><label>Rol<select name="role" defaultValue={editing.role}>{managedRoles.map((role) => <option key={role.value} value={role.value}>{role.label}</option>)}</select></label><button className="button-primary" disabled={busy}>Guardar cambios</button></form>}
+    </div>
+    <section className="panel users-panel" aria-labelledby="users-list-heading"><div className="panel-heading"><div><h2 id="users-list-heading">Usuarios registrados</h2>{data && <p>Mostrando {first}–{last} de {data.total}</p>}</div></div>{!data && !error && <p className="loading" role="status">Cargando usuarios…</p>}{data?.items.length === 0 && <Empty>No hay usuarios registrados.</Empty>}{data && data.items.length > 0 && <div className="table-scroll"><table className="users-table"><thead><tr><th>Nombre</th><th>Usuario</th><th>Correo</th><th>Rol</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>{data.items.map((managedUser) => <tr key={managedUser.id}><td><strong>{managedUser.display_name}</strong></td><td>{managedUser.username}</td><td>{managedUser.email}</td><td>{roleLabel(managedUser.role)}</td><td><span className={`status ${managedUser.is_active ? "status-active" : "status-inactive"}`}>{managedUser.is_active ? "Activo" : "Inactivo"}</span></td><td><div className="row-actions"><button type="button" onClick={() => setEditing(managedUser)} disabled={busy}>Editar</button><button type="button" onClick={() => void setActive(managedUser)} disabled={busy}>{managedUser.is_active ? "Desactivar" : "Activar"}</button><button type="button" onClick={() => void resetPassword(managedUser)} disabled={busy}>Restablecer contraseña</button></div></td></tr>)}</tbody></table></div>}
+      {data && data.total > pageSize && <nav className="pagination" aria-label="Paginación de usuarios"><button type="button" className="button-secondary" disabled={busy || offset === 0} onClick={() => setOffset(Math.max(0, offset - pageSize))}>Anterior</button><span>Página {Math.floor(offset / pageSize) + 1}</span><button type="button" className="button-secondary" disabled={busy || offset + data.items.length >= data.total} onClick={() => setOffset(offset + pageSize)}>Siguiente</button></nav>}
+    </section>
+  </section>;
+}
+function PasswordChange({ forced = false, onChanged, onLogout }: { forced?: boolean; onChanged: (user: CurrentUser) => void; onLogout?: () => void }) {
+  const [error, setError] = useState<string | null>(null); const [message, setMessage] = useState<string | null>(null); const [busy, setBusy] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form = event.currentTarget; const values = new FormData(form); const currentPassword = String(values.get("current_password") || ""); const newPassword = String(values.get("new_password") || ""); form.reset(); setError(null); setMessage(null); setBusy(true);
+    try { await request<CurrentUser>("/auth/change-password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) }); const refreshed = await request<CurrentUser>("/auth/me"); setMessage("La contraseña se actualizó correctamente."); onChanged(refreshed); }
+    catch (e) { setError(passwordError(e as ApiError)); } finally { setBusy(false); }
+  }
+  return <section className={forced ? "password-gate" : "password-page"} aria-labelledby="password-heading"><div className={forced ? "password-card" : "panel password-card"}><p className="eyebrow">Seguridad de la cuenta</p><h1 id="password-heading">{forced ? "Cambie su contraseña para continuar" : "Cambiar mi contraseña"}</h1><p>{forced ? "Está usando una contraseña temporal. Debe reemplazarla antes de acceder a la aplicación." : "Use su contraseña actual y elija una nueva de al menos 12 caracteres."}</p><form onSubmit={submit}><label>Contraseña actual <input name="current_password" type="password" autoComplete="current-password" required /></label><label>Nueva contraseña <input name="new_password" type="password" autoComplete="new-password" minLength={12} required /></label><button className="button-primary" disabled={busy}>{busy ? "Actualizando…" : "Cambiar contraseña"}</button></form><p className="notice" role="status" aria-live="polite">{message}</p><ErrorNotice error={error} />{forced && onLogout && <button className="text-button" type="button" onClick={onLogout}>Cerrar sesión</button>}</div></section>;
+}
+
+const navigationIcons = { dashboard: "◫", operations: "↔", states: "▣", uploads: "⇩", users: "♙", password: "◆" } as const;
+const mobileNavigationQuery = "(max-width: 52rem)";
+function useMobileNavigation() {
+  const [mobile, setMobile] = useState(() => window.matchMedia?.(mobileNavigationQuery).matches ?? false);
+  useEffect(() => {
+    if (!window.matchMedia) return;
+    const mediaQuery = window.matchMedia(mobileNavigationQuery);
+    const update = () => setMobile(mediaQuery.matches);
+    update();
+    mediaQuery.addEventListener("change", update);
+    return () => mediaQuery.removeEventListener("change", update);
+  }, []);
+  return mobile;
+}
 export function App() {
-  const [user, setUser] = useState<CurrentUser | null>(null); const [sessionLoading, setSessionLoading] = useState(true); const [sessionError, setSessionError] = useState<string | null>(null); const [view, setView] = useState("dashboard");
+  const [user, setUser] = useState<CurrentUser | null>(null); const [sessionLoading, setSessionLoading] = useState(true); const [sessionError, setSessionError] = useState<string | null>(null); const [view, setView] = useState("dashboard"); const [navigationOpen, setNavigationOpen] = useState(false); const mobileNavigation = useMobileNavigation();
   useEffect(() => { request<CurrentUser>("/auth/me").then(setUser).catch((e: ApiError) => { if (e.status !== 401) setSessionError(publicError(e)); }).finally(() => setSessionLoading(false)); }, []);
-  async function login(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setSessionError(null); const form = new FormData(event.currentTarget); try { const loggedIn = await request<CurrentUser>("/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: form.get("username"), password: form.get("password") }) }); setUser(loggedIn); event.currentTarget.reset(); } catch (e) { setSessionError(publicError(e as ApiError)); } }
-  async function logout() { try { await request<void>("/auth/logout", { method: "POST" }); } catch (e) { setSessionError(publicError(e as ApiError)); } finally { setUser(null); setView("dashboard"); } }
+  async function login(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setSessionError(null); const element = event.currentTarget; const form = new FormData(element); const username = form.get("username"); const password = form.get("password"); element.reset(); try { const loggedIn = await request<CurrentUser>("/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }) }); setUser(loggedIn); } catch (e) { setSessionError(publicError(e as ApiError)); } }
+  async function logout() { try { await request<void>("/auth/logout", { method: "POST" }); } catch (e) { setSessionError(publicError(e as ApiError)); } finally { setUser(null); setView("dashboard"); setNavigationOpen(false); } }
+  function navigate(destination: string) { setView(destination); setNavigationOpen(false); }
   if (sessionLoading) return <main className="application-shell"><p role="status">Verificando sesión…</p></main>;
-  if (!user) return <main className="login-shell"><section className="login-card" aria-labelledby="login-heading"><p className="eyebrow">Conciliación de activos</p><h1 id="login-heading">Iniciar sesión</h1><p>Use su cuenta local. Las credenciales solo se envían a la API de sesión del mismo origen.</p><form onSubmit={login}><label>Usuario <input name="username" autoComplete="username" required /></label><label>Contraseña <input name="password" type="password" autoComplete="current-password" required /></label><button className="button-primary">Ingresar</button></form><ErrorNotice error={sessionError} /></section></main>;
-  const canUpload = user.role === "editor" || user.role === "admin";
-  return <div className="app"><aside className="sidebar"><div className="brand"><p className="eyebrow">TISICO</p><strong>Control de activos</strong></div><nav aria-label="Aplicación"><button className={view === "dashboard" ? "active" : ""} onClick={() => setView("dashboard")}>Panel ejecutivo</button><button className={view === "operations" ? "active" : ""} onClick={() => setView("operations")}>Operaciones</button><button className={view === "states" ? "active" : ""} onClick={() => setView("states")}>Estados actuales</button>{canUpload && <button className={view === "uploads" ? "active" : ""} onClick={() => setView("uploads")}>Importaciones</button>}</nav><div className="sidebar-user"><strong>{user.display_name}</strong><span className="status">{roleLabel(user.role)}</span><button className="button-ghost" type="button" onClick={logout}>Cerrar sesión</button></div></aside><main className="content">{view === "dashboard" && <Dashboard />}{view === "operations" && <Operations />}{view === "states" && <CurrentStateList />}{view === "uploads" && canUpload && <Uploads />}</main></div>;
+  if (!user) return <main className="login-shell"><section className="login-card" aria-labelledby="login-heading"><div className="login-brand"><span className="brand-mark" aria-hidden="true">T</span><div><strong>TISICO</strong><span>Control de Activos</span></div></div><p className="eyebrow">Conciliación de activos</p><h1 id="login-heading">Iniciar sesión</h1><p>Use su cuenta local. Las credenciales solo se envían a la API de sesión del mismo origen.</p><form onSubmit={login}><label>Usuario <input name="username" autoComplete="username" required /></label><label>Contraseña <input name="password" type="password" autoComplete="current-password" required /></label><button className="button-primary">Ingresar</button></form><ErrorNotice error={sessionError} /></section></main>;
+  if (user.must_change_password) return <PasswordChange forced onChanged={setUser} onLogout={() => void logout()} />;
+  const canUpload = user.role === "editor" || user.role === "admin"; const canManageUsers = user.role === "admin";
+  const initials = user.display_name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
+  const navigationUnavailable = mobileNavigation && !navigationOpen;
+  return <div className="app"><header className="mobile-header"><div className="mobile-brand"><span className="brand-mark" aria-hidden="true">T</span><strong>TISICO</strong></div><button className="menu-toggle" type="button" aria-label={navigationOpen ? "Cerrar navegación" : "Abrir navegación"} aria-expanded={navigationOpen} aria-controls="application-sidebar" onClick={() => setNavigationOpen((open) => !open)}><span aria-hidden="true">{navigationOpen ? "×" : "☰"}</span></button></header>{navigationOpen && <button className="nav-scrim" type="button" aria-label="Cerrar navegación al seleccionar fuera del menú" onClick={() => setNavigationOpen(false)} />}<aside id="application-sidebar" className={`sidebar${navigationOpen ? " sidebar-open" : ""}`} aria-hidden={navigationUnavailable || undefined} ref={(element) => element?.toggleAttribute("inert", navigationUnavailable)}><div className="brand"><span className="brand-mark" aria-hidden="true">T</span><div><strong>TISICO</strong><span>Control de Activos</span></div></div><nav aria-label="Aplicación"><p className="nav-label">Principal</p><button className={view === "dashboard" ? "active" : ""} onClick={() => navigate("dashboard")}><span className="nav-icon" aria-hidden="true">{navigationIcons.dashboard}</span>Dashboard</button><button className={view === "states" ? "active" : ""} onClick={() => navigate("states")}><span className="nav-icon" aria-hidden="true">{navigationIcons.states}</span>Estados actuales</button><p className="nav-label">Gestión</p><button className={view === "operations" ? "active" : ""} onClick={() => navigate("operations")}><span className="nav-icon" aria-hidden="true">{navigationIcons.operations}</span>Operaciones</button>{canUpload && <button className={view === "uploads" ? "active" : ""} onClick={() => navigate("uploads")}><span className="nav-icon" aria-hidden="true">{navigationIcons.uploads}</span>Importaciones</button>}{canManageUsers && <button className={view === "users" ? "active" : ""} onClick={() => navigate("users")}><span className="nav-icon" aria-hidden="true">{navigationIcons.users}</span>Usuarios</button>}<p className="nav-label">Cuenta</p><button className={view === "password" ? "active" : ""} onClick={() => navigate("password")}><span className="nav-icon" aria-hidden="true">{navigationIcons.password}</span>Mi contraseña</button></nav><div className="sidebar-user"><div className="avatar" aria-hidden="true">{initials}</div><div className="user-copy"><strong>{user.display_name}</strong><span>{roleLabel(user.role)}</span></div><button className="logout-button" type="button" onClick={logout}>Salir</button></div></aside><main className="content">{view === "dashboard" && <Dashboard />}{view === "operations" && <Operations />}{view === "states" && <CurrentStateList />}{view === "uploads" && canUpload && <Uploads />}{view === "users" && canManageUsers && <Users currentUser={user} onCurrentUserUpdated={setUser} />}{view === "password" && <PasswordChange onChanged={setUser} />}</main></div>;
 }

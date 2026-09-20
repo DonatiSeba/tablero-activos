@@ -5,9 +5,11 @@ vi.mock("echarts", () => ({ init: () => ({ setOption: vi.fn(), resize: vi.fn(), 
 
 import { App } from "./app";
 
-const viewer = { id: "u1", username: "viewer", display_name: "Usuario visor", role: "viewer" };
+const viewer = { id: "u1", username: "viewer", display_name: "Usuario visor", role: "viewer", must_change_password: false };
 const editor = { ...viewer, role: "editor", display_name: "Usuario editor" };
 const admin = { ...viewer, role: "admin", display_name: "Usuario administrador" };
+const managedViewer = { ...viewer, id: "u2", email: "viewer@example.test", is_active: true, created_at: "2026-09-20T10:00:00Z", updated_at: "2026-09-20T10:00:00Z" };
+const usersResponse = { items: [managedViewer], total: 1, limit: 20, offset: 0 };
 const executiveMetrics = { system_count: 4, found_in_cost_center_count: 2, returned_count: 1, accounted_count: 3, difference_count: 1, coverage_percent: 75 };
 const operationalIssues = { physical_patrimonial_difference_count: 1, system_update_required_return_count: 1, system_data_quality_omission_count: 0, review_required_count: 0, unresolved_audit_case_count: 1 };
 type TemporalFixture = {
@@ -35,12 +37,25 @@ const drilldown = {
   charts: { primary_stacked_bar: { available: true, series: [{ key: "found_in_cost_center_count", label: "found_in_cost_center" }, { key: "returned_count", label: "returned" }, { key: "difference_count", label: "difference" }], items: [{ rubro: null, category: null, ...executiveMetrics }] }, general_status_donut: summary.summaries[0].charts.general_status_donut },
   page: { limit: 100, offset: 0, has_more: false, total_count: 1 },
 };
+type PaginatedDrilldownFixture = Omit<typeof drilldown, "groups"> & {
+  groups: Array<Omit<(typeof drilldown)["groups"][number], "rubro"> & { rubro: string | null }>;
+};
 const importHistory = { items: [{ batch_id: "batch-1", source: "system", cost_center: { code: "190", name: "Principal" }, report_date: "2026-09-17", imported_at: "2026-09-17T10:00:00Z", imported_by_display_name: "Usuario editor", row_count: 4, status: "completed", warning_counts: {}, processing_counts: {} }], page: {} };
 const reviewQueue = { items: [{ id: "case-1", category: "unresolved_identifier", cost_center: { code: "190", name: "Principal" }, asset: null, source: { report_date: "2026-09-17" }, reason: "missing_identifier" }], queue_counts: { total: 1 }, page: {} };
 const currentStates = { states: [{ asset_id: "asset-1", asset_code: "ACT-01", cost_center: { code: "190", name: "Principal" }, state: "returned", reason: "authorized_post_audit_column_l_return_marker", marker: { column: 12, category: "recognized_return", raw_value: "DEVOLVIO" }, source_report_date: "2026-09-17", projection_version: "audit_l_return_v1" }] };
 
-type FetchResponses = { summaries?: unknown; drilldown?: unknown; importHistory?: unknown; reviewQueue?: unknown; currentStates?: unknown };
+type FetchResponses = { summaries?: unknown; drilldown?: unknown; importHistory?: unknown; reviewQueue?: unknown; currentStates?: unknown; users?: unknown };
 function json(data: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } })); }
+function installViewport(matchesMobile: boolean) {
+  vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+    matches: matchesMobile,
+    media: query,
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  })));
+}
 function installFetch(user: object | null = viewer, responses: FetchResponses = {}) {
   const fetchMock = vi.fn((url: string, _init?: RequestInit) => {
     if (url === "/api/auth/me") return user ? json(user) : json({ detail: "Authentication required" }, 401);
@@ -51,6 +66,12 @@ function installFetch(user: object | null = viewer, responses: FetchResponses = 
     if (url === "/api/operations/review-queue") return json(responses.reviewQueue ?? reviewQueue);
     if (url === "/api/current-states") return json(responses.currentStates ?? currentStates);
     if (url.startsWith("/api/imports/")) return json({ source: url.endsWith("system") ? "system" : "audit", row_count: 3 }, 201);
+    if (url.startsWith("/api/users?")) return json(responses.users ?? usersResponse);
+    if (url === "/api/users" && _init?.method === "POST") return json({ ...managedViewer, id: "u2", display_name: "Nueva Persona", temporary_password: "Temporal-very-secret" }, 201);
+    if (url.endsWith("/reset-password")) return json({ ...managedViewer, temporary_password: "Reset-very-secret" });
+    if (/\/api\/users\/[^/]+\/(enable|disable)$/.test(url)) return json({ ...managedViewer, is_active: url.endsWith("enable") });
+    if (/\/api\/users\/[^/]+$/.test(url) && _init?.method === "PATCH") return json(managedViewer);
+    if (url === "/api/auth/change-password") return json({ ...viewer, must_change_password: false });
     if (url === "/api/auth/logout") return Promise.resolve(new Response(null, { status: 204 }));
     return json({ detail: "not found" }, 404);
   });
@@ -72,12 +93,130 @@ describe("sesión y vistas de presentación", () => {
   });
 
   it("mantiene las importaciones autorizadas para editor y administrador", async () => {
-    installFetch(viewer); const viewerView = render(<App />); await screen.findByRole("heading", { name: "Control de activos" });
+    installFetch(viewer); const viewerView = render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
     expect(screen.queryByRole("button", { name: "Importaciones" })).not.toBeInTheDocument(); viewerView.unmount();
-    installFetch(editor); const editorView = render(<App />); await screen.findByRole("heading", { name: "Control de activos" });
+    installFetch(editor); const editorView = render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
     expect(screen.getByRole("button", { name: "Importaciones" })).toBeInTheDocument(); editorView.unmount();
-    installFetch(admin); render(<App />); await screen.findByRole("heading", { name: "Control de activos" });
+    installFetch(admin); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
     expect(screen.getByRole("button", { name: "Importaciones" })).toBeInTheDocument();
+  });
+
+  it("selecciona un centro de costo y solicita su detalle real automáticamente", async () => {
+    const multipleSummaries = structuredClone(summary);
+    multipleSummaries.summaries.push({ ...structuredClone(summary.summaries[0]), cost_center: { code: "191", name: "Centro secundario" } });
+    const fetchMock = installFetch(viewer, { summaries: multipleSummaries }); render(<App />);
+    const selector = await screen.findByLabelText("Centro de costo");
+    expect(selector).toHaveValue("190");
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/system-drilldown?cost_center_code=190", expect.objectContaining({ credentials: "include" })));
+    fireEvent.change(selector, { target: { value: "191" } });
+    expect((await screen.findAllByText("CC 191 · Centro secundario")).length).toBeGreaterThan(0);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/system-drilldown?cost_center_code=191", expect.objectContaining({ credentials: "include" })));
+  });
+
+  it("avanza y regresa entre páginas del servidor de centros de costo", async () => {
+    const firstPage = structuredClone(summary);
+    firstPage.page = { limit: 1, offset: 0, has_more: true, total_count: 2 };
+    const secondPage = structuredClone(summary);
+    secondPage.summaries[0].cost_center = { code: "191", name: "Centro secundario" };
+    secondPage.page = { limit: 1, offset: 1, has_more: false, total_count: 2 };
+    const fetchMock = vi.fn((url: string) => {
+      if (url === "/api/auth/me") return json(viewer);
+      if (url === "/api/dashboard/summaries") return json(firstPage);
+      if (url === "/api/dashboard/summaries?limit=1&offset=1") return json(secondPage);
+      if (url === "/api/dashboard/summaries?limit=1&offset=0") return json(firstPage);
+      if (url.startsWith("/api/dashboard/system-drilldown")) {
+        const response = structuredClone(drilldown);
+        const code = new URL(url, "https://example.test").searchParams.get("cost_center_code") || "190";
+        response.cost_center = code === "191" ? { code, name: "Centro secundario" } : { code, name: "Principal" };
+        return json(response);
+      }
+      return json({}, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock); render(<App />);
+
+    const firstNavigation = await screen.findByRole("navigation", { name: "Paginación de centros de costo" });
+    expect(within(firstNavigation).getByRole("button", { name: "Anterior" })).toBeDisabled();
+    fireEvent.click(within(firstNavigation).getByRole("button", { name: "Siguiente" }));
+
+    expect(await screen.findByLabelText("Centro de costo")).toHaveValue("191");
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/summaries?limit=1&offset=1", expect.objectContaining({ credentials: "include" })));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/system-drilldown?cost_center_code=191", expect.objectContaining({ credentials: "include" })));
+    const secondNavigation = screen.getByRole("navigation", { name: "Paginación de centros de costo" });
+    expect(within(secondNavigation).getByRole("button", { name: "Siguiente" })).toBeDisabled();
+    expect(screen.getByRole("option", { name: "CC 191 · Centro secundario" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "CC 190 · Principal" })).not.toBeInTheDocument();
+
+    fireEvent.click(within(secondNavigation).getByRole("button", { name: "Anterior" }));
+    expect(await screen.findByLabelText("Centro de costo")).toHaveValue("190");
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/summaries?limit=1&offset=0", expect.objectContaining({ credentials: "include" })));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/system-drilldown?cost_center_code=190", expect.objectContaining({ credentials: "include" })));
+  });
+
+  it("renderiza solamente la página agrupada solicitada al avanzar y regresar", async () => {
+    const firstPage: PaginatedDrilldownFixture = structuredClone(drilldown);
+    firstPage.groups[0].rubro = "Rubro inicial";
+    firstPage.page = { limit: 1, offset: 0, has_more: true, total_count: 2 };
+    const secondPage: PaginatedDrilldownFixture = structuredClone(drilldown);
+    secondPage.groups[0].rubro = "Rubro siguiente";
+    secondPage.page = { limit: 1, offset: 1, has_more: false, total_count: 2 };
+    const fetchMock = vi.fn((url: string) => {
+      if (url === "/api/auth/me") return json(viewer);
+      if (url === "/api/dashboard/summaries") return json(summary);
+      if (url === "/api/dashboard/system-drilldown?cost_center_code=190") return json(firstPage);
+      if (url === "/api/dashboard/system-drilldown?cost_center_code=190&limit=1&offset=1") return json(secondPage);
+      if (url === "/api/dashboard/system-drilldown?cost_center_code=190&limit=1&offset=0") return json(firstPage);
+      return json({}, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock); render(<App />);
+
+    const firstNavigation = await screen.findByRole("navigation", { name: "Paginación del detalle de conciliación" });
+    expect(screen.getByText("Rubro · Rubro inicial")).toBeInTheDocument();
+    expect(within(firstNavigation).getByRole("button", { name: "Anterior" })).toBeDisabled();
+    fireEvent.click(within(firstNavigation).getByRole("button", { name: "Siguiente" }));
+
+    expect(await screen.findByText("Rubro · Rubro siguiente")).toBeInTheDocument();
+    expect(screen.queryByText("Rubro · Rubro inicial")).not.toBeInTheDocument();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/system-drilldown?cost_center_code=190&limit=1&offset=1", expect.objectContaining({ credentials: "include" })));
+    const secondNavigation = screen.getByRole("navigation", { name: "Paginación del detalle de conciliación" });
+    expect(within(secondNavigation).getByRole("button", { name: "Siguiente" })).toBeDisabled();
+    fireEvent.click(within(secondNavigation).getByRole("button", { name: "Anterior" }));
+
+    expect(await screen.findByText("Rubro · Rubro inicial")).toBeInTheDocument();
+    expect(screen.queryByText("Rubro · Rubro siguiente")).not.toBeInTheDocument();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/system-drilldown?cost_center_code=190&limit=1&offset=0", expect.objectContaining({ credentials: "include" })));
+  });
+
+  it("oculta semánticamente la navegación móvil cerrada y la restaura al abrirla", async () => {
+    installViewport(true); installFetch(); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
+    const sidebar = document.getElementById("application-sidebar")!;
+    const toggle = screen.getByRole("button", { name: "Abrir navegación" });
+    expect(toggle).toHaveAttribute("type", "button");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(sidebar).toHaveAttribute("aria-hidden", "true");
+    expect(sidebar).toHaveAttribute("inert");
+    expect(screen.queryByRole("navigation", { name: "Aplicación" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Salir" })).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "Cerrar navegación" })).toHaveAttribute("aria-expanded", "true");
+    expect(sidebar).not.toHaveAttribute("aria-hidden");
+    expect(sidebar).not.toHaveAttribute("inert");
+    expect(screen.getByRole("navigation", { name: "Aplicación" })).toBeInTheDocument();
+    const backdrop = screen.getByRole("button", { name: "Cerrar navegación al seleccionar fuera del menú" });
+    fireEvent.click(backdrop);
+    expect(screen.getByRole("button", { name: "Abrir navegación" })).toHaveAttribute("aria-expanded", "false");
+    expect(sidebar).toHaveAttribute("aria-hidden", "true");
+    expect(sidebar).toHaveAttribute("inert");
+    expect(backdrop).not.toBeInTheDocument();
+  });
+
+  it("mantiene la navegación de escritorio en el árbol accesible sin abrir el menú móvil", async () => {
+    installViewport(false); installFetch(); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
+    const sidebar = document.getElementById("application-sidebar")!;
+    expect(sidebar).not.toHaveAttribute("aria-hidden");
+    expect(sidebar).not.toHaveAttribute("inert");
+    expect(screen.getByRole("navigation", { name: "Aplicación" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Salir" })).toBeInTheDocument();
   });
 
   it("muestra KPI y advertencia de vigencia del servidor sin exponer su texto crudo", async () => {
@@ -90,12 +229,11 @@ describe("sesión y vistas de presentación", () => {
   });
 
   it("localiza los valores de presentación del servidor sin exponer sus enums", async () => {
-    installFetch(); render(<App />); await screen.findByRole("heading", { name: "Control de activos" });
+    installFetch(); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
     expect(screen.getByText("Los estados y las diferencias se calculan sobre activos distintos del lote de sistema seleccionado. Los estados de auditoría son proyecciones del lote de auditoría seleccionado. Los KPI y gráficos se calculan únicamente en el servidor.")).toBeInTheDocument();
     expect(screen.queryByText(summary.metric_scope)).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Ver análisis" }));
-    expect(await screen.findByText(/Activo \(1\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Activo · 1/)).toBeInTheDocument();
     expect(screen.queryByText("Active")).not.toBeInTheDocument();
     expect(screen.getByText("Casos pendientes de revisión")).toBeInTheDocument();
     expect(screen.getByText("Casos de auditoría sin resolver")).toBeInTheDocument();
@@ -129,11 +267,10 @@ describe("sesión y vistas de presentación", () => {
   });
 
   it("renderiza el gráfico agrupado y las etiquetas nulas como sin asignar", async () => {
-    installFetch(); render(<App />); await screen.findByRole("heading", { name: "Control de activos" });
-    fireEvent.click(screen.getByRole("button", { name: "Ver análisis" }));
+    installFetch(); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
     expect(await screen.findByRole("img", { name: "Barras apiladas de conciliación por categoría" })).toBeInTheDocument();
-    expect(screen.getByText("Rubro: Sin rubro asignado")).toBeInTheDocument();
-    expect(screen.getByText("Categoría: Sin categoría asignada")).toBeInTheDocument();
+    expect(screen.getByText("Rubro · Sin rubro asignado")).toBeInTheDocument();
+    expect(screen.getByText("Sin categoría asignada")).toBeInTheDocument();
     expect(screen.getByText("Sin producto asignado")).toBeInTheDocument();
   });
 
@@ -144,7 +281,7 @@ describe("sesión y vistas de presentación", () => {
   });
 
   it("envía la importación de sistema como multipart y anuncia el resultado localizado", async () => {
-    const fetchMock = installFetch(editor); render(<App />); await screen.findByRole("heading", { name: "Control de activos" });
+    const fetchMock = installFetch(editor); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
     fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
     const form = screen.getByRole("heading", { name: "Reporte de sistema" }).closest("form")!;
     fireEvent.change(within(form).getByLabelText("Libro de trabajo"), { target: { files: [new File(["workbook"], "report.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })] } });
@@ -152,5 +289,67 @@ describe("sesión y vistas de presentación", () => {
     expect(await screen.findByText("La importación de Sistema fue aceptada con 3 filas.")).toBeInTheDocument();
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/imports/system", expect.objectContaining({ method: "POST", credentials: "include" })));
     const uploadCall = fetchMock.mock.calls.find(([url]) => url === "/api/imports/system"); expect(uploadCall?.[1]?.body).toBeInstanceOf(FormData);
+  });
+
+  it("reserva Usuarios para ADMIN y ofrece el cambio de contraseña a toda cuenta", async () => {
+    installFetch(viewer); const viewerView = render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
+    expect(screen.queryByRole("button", { name: "Usuarios" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Mi contraseña" }));
+    expect(screen.getByRole("heading", { name: "Cambiar mi contraseña" })).toBeInTheDocument(); viewerView.unmount();
+
+    installFetch(admin); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
+    fireEvent.click(screen.getByRole("button", { name: "Usuarios" }));
+    expect(await screen.findByRole("heading", { name: "Usuarios" })).toBeInTheDocument();
+    expect(await screen.findByText("viewer@example.test")).toBeInTheDocument();
+    expect(screen.getByText("Consulta")).toBeInTheDocument();
+    expect(screen.getByText("Activo")).toBeInTheDocument();
+  });
+
+  it("crea usuarios y oculta la contraseña temporal al cerrar sin persistirla", async () => {
+    const fetchMock = installFetch(admin); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
+    fireEvent.click(screen.getByRole("button", { name: "Usuarios" }));
+    const form = (await screen.findByRole("heading", { name: "Crear usuario" })).closest("form")!;
+    fireEvent.change(within(form).getByLabelText("Nombre para mostrar"), { target: { value: "Nueva Persona" } });
+    fireEvent.change(within(form).getByLabelText("Usuario"), { target: { value: "nueva" } });
+    fireEvent.change(within(form).getByLabelText("Correo electrónico"), { target: { value: "nueva@example.test" } });
+    fireEvent.change(within(form).getByLabelText("Rol"), { target: { value: "editor" } }); fireEvent.submit(form);
+    expect(await screen.findByLabelText("Contraseña temporal")).toHaveTextContent("Temporal-very-secret");
+    const createCall = fetchMock.mock.calls.find(([url, init]) => url === "/api/users" && init?.method === "POST");
+    expect(createCall?.[1]).toEqual(expect.objectContaining({ credentials: "include", method: "POST" }));
+    expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({ username: "nueva", email: "nueva@example.test", display_name: "Nueva Persona", role: "editor" });
+    expect(localStorage.length).toBe(0); expect(sessionStorage.length).toBe(0);
+    fireEvent.click(screen.getByRole("button", { name: "Cerrar y ocultar" }));
+    expect(screen.queryByText("Temporal-very-secret")).not.toBeInTheDocument();
+  });
+
+  it("edita, desactiva y restablece usuarios mediante los contratos reales", async () => {
+    const fetchMock = installFetch(admin); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" }); fireEvent.click(screen.getByRole("button", { name: "Usuarios" }));
+    const edit = await screen.findByRole("button", { name: "Editar" }); fireEvent.click(edit);
+    const form = screen.getByRole("heading", { name: "Editar usuario" }).closest("form")!;
+    fireEvent.change(within(form).getByLabelText("Nombre para mostrar"), { target: { value: "Visor actualizado" } }); fireEvent.change(within(form).getByLabelText("Rol"), { target: { value: "editor" } }); fireEvent.submit(form);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/users/u2", expect.objectContaining({ credentials: "include", method: "PATCH" })));
+    fireEvent.click(await screen.findByRole("button", { name: "Desactivar" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/users/u2/disable", expect.objectContaining({ credentials: "include", method: "POST" })));
+    fireEvent.click(await screen.findByRole("button", { name: "Restablecer contraseña" }));
+    expect(await screen.findByLabelText("Contraseña temporal")).toHaveTextContent("Reset-very-secret");
+  });
+
+  it("bloquea la navegación hasta cambiar una contraseña temporal y refresca la sesión", async () => {
+    let passwordChanged = false;
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url === "/api/auth/me") return json({ ...viewer, must_change_password: !passwordChanged });
+      if (url === "/api/auth/change-password") { passwordChanged = true; return json({ ...viewer, must_change_password: false }); }
+      if (url === "/api/dashboard/summaries") return json(summary);
+      if (url.startsWith("/api/dashboard/system-drilldown")) return json(drilldown);
+      return json({}, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock); render(<App />);
+    expect(await screen.findByRole("heading", { name: "Cambie su contraseña para continuar" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Aplicación" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Contraseña actual"), { target: { value: "Temporal-very-secret" } });
+    fireEvent.change(screen.getByLabelText("Nueva contraseña"), { target: { value: "Nueva-clave-segura-123" } }); fireEvent.click(screen.getByRole("button", { name: "Cambiar contraseña" }));
+    expect(await screen.findByRole("heading", { name: "Conciliación de activos" })).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith("/api/auth/change-password", expect.objectContaining({ credentials: "include", method: "POST" }));
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/auth/me")).toHaveLength(2);
   });
 });
