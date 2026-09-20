@@ -5,11 +5,13 @@ from decimal import Decimal
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, literal, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.app.auth import password_hasher
+from backend.app.dashboard import _ordered_distinct_rubros
 from backend.app.db import Base, get_db
 from backend.app.main import app
 from backend.app.models import (
@@ -545,3 +547,232 @@ def test_system_drilldown_paginates_high_cardinality_leaf_groups_before_nesting(
             ],
         }
     ]
+
+
+def test_rubro_options_compile_with_distinct_inside_postgresql_ordering_query() -> None:
+    leaf_rows = select(literal("rubro").label("rubro")).subquery("leaf_rows")
+
+    sql = " ".join(
+        str(
+            _ordered_distinct_rubros(leaf_rows).compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        ).split()
+    )
+
+    assert sql.startswith("SELECT anon_1.rubro FROM (SELECT DISTINCT leaf_rows.rubro AS rubro")
+    assert "ORDER BY anon_1.rubro IS NOT NULL, lower(anon_1.rubro), anon_1.rubro" in sql
+
+
+def test_rubro_reconciliation_chart_selects_and_isolates_complete_category_metrics(database: sessionmaker[Session]) -> None:
+    populate(database)
+    special_rubro = "Operations & Field/Δ"
+    with database() as db:
+        center = db.scalar(select(CostCenter).where(CostCenter.code == "190"))
+        system = db.scalar(
+            select(ImportBatch)
+            .where(ImportBatch.cost_center_id == center.id, ImportBatch.source == ImportSource.SYSTEM)
+            .order_by(ImportBatch.report_date.desc(), ImportBatch.id.desc())
+        )
+        audit = db.scalar(
+            select(ImportBatch)
+            .where(ImportBatch.cost_center_id == center.id, ImportBatch.source == ImportSource.AUDIT)
+            .order_by(ImportBatch.report_date.desc(), ImportBatch.id.desc())
+        )
+
+        def add_reconciled_asset(code: str, rubro: str | None, category: str | None, state: AuditCurrentState) -> None:
+            asset = Asset(original_code=code, normalized_code=code)
+            db.add(asset)
+            db.flush()
+            db.add(
+                AssetObservation(
+                    import_batch_id=system.id,
+                    source=ImportSource.SYSTEM,
+                    event=ObservationEvent.SNAPSHOT,
+                    observed_on=system.report_date,
+                    asset_id=asset.id,
+                    cost_center_id=center.id,
+                    original_data=_system_data(rubro, category, "Product"),
+                    quantity=Decimal("1"),
+                )
+            )
+            observation = AssetObservation(
+                import_batch_id=audit.id,
+                source=ImportSource.AUDIT,
+                event=ObservationEvent.SNAPSHOT,
+                observed_on=audit.report_date,
+                cost_center_id=center.id,
+                original_data={"cells": []},
+                quantity=Decimal("1"),
+            )
+            db.add(observation)
+            db.flush()
+            db.add_all(
+                (
+                    ReconciliationCase(
+                        audit_observation_id=observation.id,
+                        cost_center_id=center.id,
+                        candidate_asset_id=asset.id,
+                        match_strategy=AuditMatchStrategy.EXACT_ORIGINAL_CODE,
+                    ),
+                    AuditCurrentStateProjection(
+                        asset_id=asset.id,
+                        cost_center_id=center.id,
+                        audit_observation_id=observation.id,
+                        state=state,
+                        marker_category=(
+                            AuditReturnMarkerCategory.RECOGNIZED_RETURN
+                            if state == AuditCurrentState.RETURNED
+                            else AuditReturnMarkerCategory.UNMARKED_UNKNOWN
+                        ),
+                        marker_column=12,
+                        reason="test",
+                        projection_version="audit_l_return_v1",
+                    ),
+                )
+            )
+
+        add_reconciled_asset("SPECIAL", special_rubro, "Encoded category", AuditCurrentState.FOUND)
+        add_reconciled_asset("NULL-RUBRO", None, None, AuditCurrentState.RETURNED)
+        db.commit()
+
+    async def exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response, httpx.Response, httpx.Response]:
+        api = await client()
+        try:
+            assert (await api.post("/api/auth/login", json={"username": "viewer", "password": "password"})).status_code == 200
+            return (
+                await api.get("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190"),
+                await api.get("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro="),
+                await api.get("/api/dashboard/rubro-reconciliation-chart", params={"cost_center_code": "190", "rubro": special_rubro}),
+                await api.get("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=IT"),
+                await api.get("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=missing"),
+            )
+        finally:
+            await api.aclose()
+
+    omitted, explicit_null, decoded, it_chart, invalid = asyncio.run(exercise())
+    assert all(response.status_code == 200 for response in (omitted, explicit_null, decoded, it_chart, invalid))
+    expected_null_selection = {"value": None, "label": "Sin rubro asignado"}
+    assert omitted.json()["rubro_options"] == [
+        expected_null_selection,
+        {"value": "IT", "label": "IT"},
+        {"value": special_rubro, "label": special_rubro},
+    ]
+    assert omitted.json()["selected_rubro"] == explicit_null.json()["selected_rubro"] == expected_null_selection
+    assert explicit_null.json()["category_chart"] == {
+        "available": True,
+        "reason": None,
+        "series": [
+            {"key": "found_in_cost_center_count", "label": "found_in_cost_center"},
+            {"key": "returned_count", "label": "returned"},
+            {"key": "difference_count", "label": "difference"},
+        ],
+        "items": [
+            {
+                "category": None,
+                "category_label": "Sin categoría asignada",
+                "found_in_cost_center_count": 0,
+                "returned_count": 1,
+                "difference_count": 0,
+            }
+        ],
+        "source_freshness": explicit_null.json()["category_chart"]["source_freshness"],
+    }
+    assert decoded.json()["selected_rubro"] == {"value": special_rubro, "label": special_rubro}
+    assert decoded.json()["category_chart"]["items"] == [
+        {
+            "category": "Encoded category",
+            "category_label": "Encoded category",
+            "found_in_cost_center_count": 1,
+            "returned_count": 0,
+            "difference_count": 0,
+        }
+    ]
+    assert it_chart.json()["category_chart"]["items"] == [
+        {
+            "category": "Laptop",
+            "category_label": "Laptop",
+            "found_in_cost_center_count": 1,
+            "returned_count": 0,
+            "difference_count": 1,
+        }
+    ]
+    assert invalid.json()["category_chart"]["available"] is False
+    assert invalid.json()["category_chart"]["reason"] == "invalid_rubro_selection"
+    assert invalid.json()["category_chart"]["items"] == []
+
+
+def test_rubro_reconciliation_chart_reports_missing_sources_and_complete_high_cardinality_categories(database: sessionmaker[Session]) -> None:
+    populate(database)
+    with database() as db:
+        missing_system_center = CostCenter(code="191", name="Audit only")
+        missing_audit_center = CostCenter(code="192", name="System only")
+        db.add_all((missing_system_center, missing_audit_center))
+        db.flush()
+        _batch(db, missing_system_center, ImportSource.AUDIT, date(2026, 7, 1), 10)
+        system_only = _batch(db, missing_audit_center, ImportSource.SYSTEM, date(2026, 7, 1), 11)
+        db.add(
+            AssetObservation(
+                import_batch_id=system_only.id,
+                source=ImportSource.SYSTEM,
+                event=ObservationEvent.SNAPSHOT,
+                observed_on=system_only.report_date,
+                cost_center_id=missing_audit_center.id,
+                original_data=_system_data("Only system", "System category", "Product"),
+                quantity=Decimal("1"),
+            )
+        )
+        center = db.scalar(select(CostCenter).where(CostCenter.code == "190"))
+        system = db.scalar(
+            select(ImportBatch)
+            .where(ImportBatch.cost_center_id == center.id, ImportBatch.source == ImportSource.SYSTEM)
+            .order_by(ImportBatch.report_date.desc(), ImportBatch.id.desc())
+        )
+        db.add_all(
+            AssetObservation(
+                import_batch_id=system.id,
+                source=ImportSource.SYSTEM,
+                event=ObservationEvent.SNAPSHOT,
+                observed_on=system.report_date,
+                cost_center_id=center.id,
+                original_data=_system_data("IT", f"Category-{number:03}", "Product"),
+                quantity=Decimal("1"),
+            )
+            for number in range(102)
+        )
+        db.commit()
+
+    async def exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
+        api = await client()
+        try:
+            assert (await api.post("/api/auth/login", json={"username": "viewer", "password": "password"})).status_code == 200
+            return (
+                await api.get("/api/dashboard/rubro-reconciliation-chart?cost_center_code=191"),
+                await api.get("/api/dashboard/rubro-reconciliation-chart?cost_center_code=192"),
+                await api.get("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=IT"),
+            )
+        finally:
+            await api.aclose()
+
+    missing_system, missing_audit, high_cardinality = asyncio.run(exercise())
+    assert missing_system.status_code == missing_audit.status_code == high_cardinality.status_code == 200
+    assert missing_system.json()["rubro_options"] == []
+    assert missing_system.json()["category_chart"]["reason"] == "missing_system_evidence"
+    assert missing_audit.json()["category_chart"]["reason"] == "missing_audit_evidence"
+    assert missing_audit.json()["category_chart"]["items"] == [
+        {
+            "category": "System category",
+            "category_label": "System category",
+            "found_in_cost_center_count": None,
+            "returned_count": None,
+            "difference_count": None,
+        }
+    ]
+    chart = high_cardinality.json()["category_chart"]
+    assert chart["available"] is True
+    assert chart["reason"] is None
+    assert len(chart["items"]) == 103
+    assert chart["items"][0]["category"] == "Category-000"
+    assert chart["items"][-1]["category"] == "Laptop"
+    assert "page" not in high_cardinality.json()

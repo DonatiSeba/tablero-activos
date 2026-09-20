@@ -183,6 +183,20 @@ source-row JSON, raw notes, session data, or audit-log data.
   10,000. `page` gives `has_more` and the total leaf-group count. It returns a
   stable, safe empty `groups` list and zero-count page when no system evidence
   exists.
+- `GET /api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=`
+  returns complete, unpaginated category bars for one rubro from the selected
+  system snapshot. `cost_center_code` is required. Omitting `rubro` selects the
+  first complete option in deterministic null-first, case-insensitive order;
+  explicit `rubro=` selects the null/unassigned rubro, and any other value matches
+  exactly after URL decoding. `rubro_options` and `selected_rubro` preserve null
+  values while providing `Sin rubro asignado` labels; category items likewise
+  preserve null with `Sin categoría asignada`. The server owns the
+  `found_in_cost_center_count`, `returned_count`, and `difference_count` series
+  and applies the selected rubro before grouping. There is no category pagination
+  or truncation. `category_chart.available` and its localizable `reason` express
+  `cost_center_not_found`, `missing_system_evidence`, `missing_audit_evidence`,
+  `invalid_rubro_selection`, or `empty_rubro`; unavailable audit metrics are
+  `null`. Source/audit batch metadata and freshness remain server-calculated.
 - `GET /api/operations/import-history?source=&cost_center_code=&status=&limit=50&offset=0`
   returns safe batch metadata and sanitized warning/processing counts. Ordering
   is `imported_at` descending then batch UUID descending. `limit` is 1–100 and
