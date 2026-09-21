@@ -65,6 +65,13 @@ Make the dashboard suppress unavailable temporal comparisons, surface every audi
   - Evidence: writer and independent verification passed with 25 frontend tests, production build, and whitespace checks. `ProductBars` emits item-level `emphasis.focus: [productIndex]` across all three metric series, retains the axis tooltip, and removes series-wide focus only from the product chart. Type safety uses a narrow local datum plus an isolated `unknown` boundary; no broad `any` or client arithmetic was introduced. Real-browser hover remains unverified.
   - Commit: frontend work unit `fix: focus reconciliation hover by product`.
 
+- [x] RDR-07 Preserve detail position during filter requests.
+  - Outcome: rubro, category, and product-page changes keep the existing detail result mounted while the AJAX request is in flight, preventing section-height collapse and scroll jumps.
+  - Allowed edit candidates: `frontend/src/app.tsx`, `frontend/src/app.test.tsx`.
+  - Checks: focused/full frontend tests, production build, whitespace check.
+  - Evidence: writer and independent verification passed with 29 frontend tests, production build, and whitespace checks. The last successful detail stays mounted during AJAX refreshes; only initial/center changes clear it. `aria-busy`, stable chip status, disabled controls, exact rollback identity, StrictMode race coverage, stale-response rejection, and failed-request fallback were verified. No scroll manipulation was added. Real-browser layout remains unverified.
+  - Commit: frontend work unit `fix: preserve detail during dashboard refresh`.
+
 ## Progress
 - 2026-09-21: User requested three refinements: hide unavailable temporal evolution, count audited items absent from the selected CC system list, and add category/product filtering.
 - 2026-09-21: Read-only mapping confirmed temporal availability is already server-owned; cross-CC matches currently collapse into a generic quality metric; the real hierarchy is Rubro → Categoría → Producto.
@@ -78,6 +85,8 @@ Make the dashboard suppress unavailable temporal comparisons, surface every audi
 - 2026-09-21: User authorized two local work units: backend contract/tests/docs in `f5c07c1`, followed by the frontend experience/tests/styles and this tracker in `feat: improve reconciliation dashboard detail`. Unrelated favicon/index changes remain outside both commits.
 - 2026-09-21: User accepted the production rollout, then requested product-oriented hover: one product row should retain all three metric bars together.
 - 2026-09-21: RDR-06 implemented and independently verified. Product hover now focuses the same data index across all three metric series; no actionable finding remains.
+- 2026-09-21: User reported scroll jumping to the top on detail selections. Inspection confirmed requests are AJAX, but `rubroChart` is cleared at request start, collapsing the section before the response arrives.
+- 2026-09-21: RDR-07 implemented with stale-while-revalidate rendering. Independent review found and closed one rollback-suppression race by binding suppression to the exact request tuple. Final verification passed.
 
 ## Next step
 Await explicit commit authorization, then push/deploy separately if requested. Keep unrelated user-owned favicon/index changes outside this work unit.

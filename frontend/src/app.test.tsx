@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { setOptionMock } = vi.hoisted(() => ({ setOptionMock: vi.fn() }));
@@ -75,6 +76,10 @@ type ProductChartOption = {
   series?: { emphasis?: { focus?: unknown }; data: { value: number | null; emphasis: { focus: readonly number[] } }[] }[];
 };
 function json(data: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } })); }
+function deferredResponse() {
+  let resolve: (response: Response) => void = () => undefined;
+  return { promise: new Promise<Response>((next) => { resolve = next; }), resolve: (response: Response) => resolve(response) };
+}
 function installViewport(matchesMobile: boolean) {
   vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
     matches: matchesMobile,
@@ -428,6 +433,151 @@ describe("sesión y vistas de presentación", () => {
     render(<App />);
     expect(await screen.findByText("No se pudo completar la solicitud. Intente nuevamente.")).toBeInTheDocument();
     expect(screen.queryByText("raw chart outage")).not.toBeInTheDocument();
+  });
+
+  it("mantiene el detalle durante actualizaciones de rubro, categoría y página, y revierte un error", async () => {
+    const initial = structuredClone(rubroChart);
+    initial.product_chart.page = { limit: 1, offset: 0, has_more: true, total_count: 2 };
+    initial.product_chart.items = [initial.product_chart.items[0]];
+    const afterRubro = structuredClone(initial);
+    afterRubro.selected_rubro = { value: null, label: "Sin rubro asignado" };
+    const afterCategory = structuredClone(afterRubro);
+    afterCategory.selected_category = { value: null, label: "Sin categoría asignada" };
+    const afterPage = structuredClone(afterCategory);
+    afterPage.product_chart.page = { limit: 1, offset: 1, has_more: false, total_count: 2 };
+    afterPage.product_chart.items = [rubroChart.product_chart.items[1]];
+    const initialRequest = deferredResponse();
+    const rubroRequest = deferredResponse();
+    const categoryRequest = deferredResponse();
+    const pageRequest = deferredResponse();
+    const failedRequest = deferredResponse();
+    const fetchMock = vi.fn((url: string) => {
+      if (url === "/api/auth/me") return json(viewer);
+      if (url === "/api/dashboard/summaries") return json(summary);
+      if (url.startsWith("/api/dashboard/system-drilldown")) return json(drilldown);
+      if (url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=190") return initialRequest.promise;
+      if (url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=") return rubroRequest.promise;
+      if (url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=&category=") return categoryRequest.promise;
+      if (url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=&category=&product_limit=1&product_offset=1") return pageRequest.promise;
+      if (url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=&category=Categor%C3%ADa%20%26%20%C3%81cento") return failedRequest.promise;
+      return json({}, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock); render(<App />);
+
+    expect(await screen.findByText("Cargando productos de la categoría…")).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Barras agrupadas de conciliación por producto" })).not.toBeInTheDocument();
+    initialRequest.resolve(await json(initial));
+    const chart = await screen.findByRole("img", { name: "Barras agrupadas de conciliación por producto" });
+    const detail = screen.getByRole("heading", { name: "Detalle de conciliación" }).closest("section")!;
+
+    fireEvent.change(screen.getByLabelText("Rubro"), { target: { value: "" } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=", expect.anything()));
+    expect(chart).toBeInTheDocument();
+    expect(screen.getByLabelText("Rubro")).toHaveValue("Rubro & Ácento");
+    expect(screen.getByLabelText("Categoría")).toBeDisabled();
+    expect(within(screen.getByRole("navigation", { name: "Paginación de productos de conciliación" })).getByRole("button", { name: "Siguiente" })).toBeDisabled();
+    expect(detail).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByText("Actualizando…")).toBeInTheDocument();
+    expect(screen.queryByText("Cargando productos de la categoría…")).not.toBeInTheDocument();
+    rubroRequest.resolve(await json(afterRubro));
+    await waitFor(() => expect(screen.getByLabelText("Rubro")).toHaveValue(""));
+
+    fireEvent.change(screen.getByLabelText("Categoría"), { target: { value: "" } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=&category=", expect.anything()));
+    expect(chart).toBeInTheDocument();
+    expect(screen.getByLabelText("Categoría")).toHaveValue("Categoría & Ácento");
+    categoryRequest.resolve(await json(afterCategory));
+    await waitFor(() => expect(screen.getByLabelText("Categoría")).toHaveValue(""));
+
+    fireEvent.click(within(screen.getByRole("navigation", { name: "Paginación de productos de conciliación" })).getByRole("button", { name: "Siguiente" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=&category=&product_limit=1&product_offset=1", expect.anything()));
+    expect(chart).toBeInTheDocument();
+    expect(detail).toHaveAttribute("aria-busy", "true");
+    pageRequest.resolve(await json(afterPage));
+    await waitFor(() => expect(within(screen.getByRole("navigation", { name: "Paginación de productos de conciliación" })).getByText("Página 2 de 2")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText("Categoría"), { target: { value: "Categoría & Ácento" } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=&category=Categor%C3%ADa%20%26%20%C3%81cento", expect.anything()));
+    expect(chart).toBeInTheDocument();
+    failedRequest.resolve(await json({ detail: "outage" }, 503));
+    expect(await screen.findByRole("alert")).toHaveTextContent("No se pudo completar la solicitud. Intente nuevamente.");
+    expect(screen.getByLabelText("Categoría")).toHaveValue("");
+    expect(within(screen.getByRole("navigation", { name: "Paginación de productos de conciliación" })).getByText("Página 2 de 2")).toBeInTheDocument();
+    await waitFor(() => expect(detail).toHaveAttribute("aria-busy", "false"));
+  });
+
+  it("ejecuta la solicitud del nuevo centro cuando una reversión fallida queda en lote", async () => {
+    const multipleSummaries = structuredClone(summary);
+    multipleSummaries.summaries.push({ ...structuredClone(summary.summaries[0]), cost_center: { code: "191", name: "Centro secundario" } });
+    const failedRequest = deferredResponse();
+    const fetchMock = vi.fn((url: string) => {
+      if (url === "/api/auth/me") return json(viewer);
+      if (url === "/api/dashboard/summaries") return json(multipleSummaries);
+      if (url.startsWith("/api/dashboard/system-drilldown")) return json(drilldown);
+      if (url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=") return failedRequest.promise;
+      if (url.startsWith("/api/dashboard/rubro-reconciliation-chart")) return json(rubroChart);
+      return json({}, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock); render(<StrictMode><App /></StrictMode>);
+
+    const center = await screen.findByLabelText("Centro de costo");
+    fireEvent.change(await screen.findByLabelText("Rubro"), { target: { value: "" } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=", expect.anything()));
+    await act(async () => {
+      failedRequest.resolve(new Response(JSON.stringify({ detail: "outage" }), { status: 503 }));
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.change(center, { target: { value: "191" } });
+    });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=191", expect.anything()));
+  });
+
+  it("ejecuta la solicitud del filtro más nuevo cuando una reversión fallida queda en lote", async () => {
+    const filtered = structuredClone(rubroChart);
+    filtered.rubro_options.push({ value: "Otro rubro", label: "Otro rubro" });
+    const failedRequest = deferredResponse();
+    const fetchMock = vi.fn((url: string) => {
+      if (url === "/api/auth/me") return json(viewer);
+      if (url === "/api/dashboard/summaries") return json(summary);
+      if (url.startsWith("/api/dashboard/system-drilldown")) return json(drilldown);
+      if (url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=") return failedRequest.promise;
+      if (url.startsWith("/api/dashboard/rubro-reconciliation-chart")) return json(filtered);
+      return json({}, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock); render(<StrictMode><App /></StrictMode>);
+
+    fireEvent.change(await screen.findByLabelText("Rubro"), { target: { value: "" } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=", expect.anything()));
+    await act(async () => {
+      failedRequest.resolve(new Response(JSON.stringify({ detail: "outage" }), { status: 503 }));
+      await Promise.resolve();
+      await Promise.resolve();
+      fireEvent.change(screen.getByLabelText("Rubro"), { target: { value: "Otro rubro" } });
+    });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=Otro%20rubro", expect.anything()));
+  });
+
+  it("suprime sólo la solicitud que restaura la tupla exacta", async () => {
+    const failedRequest = deferredResponse();
+    const fetchMock = vi.fn((url: string) => {
+      if (url === "/api/auth/me") return json(viewer);
+      if (url === "/api/dashboard/summaries") return json(summary);
+      if (url.startsWith("/api/dashboard/system-drilldown")) return json(drilldown);
+      if (url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=") return failedRequest.promise;
+      if (url.startsWith("/api/dashboard/rubro-reconciliation-chart")) return json(rubroChart);
+      return json({}, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock); render(<StrictMode><App /></StrictMode>);
+
+    fireEvent.change(await screen.findByLabelText("Rubro"), { target: { value: "" } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=", expect.anything()));
+    const initialRequestCount = fetchMock.mock.calls.filter(([url]) => url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=190").length;
+    failedRequest.resolve(new Response(JSON.stringify({ detail: "outage" }), { status: 503 }));
+
+    await screen.findByRole("alert");
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=190")).toHaveLength(initialRequestCount));
   });
 
   it("muestra carga, protege contra respuestas obsoletas y no conserva el gráfico anterior", async () => {

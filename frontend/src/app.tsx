@@ -72,6 +72,19 @@ type RubroReconciliationResponse = {
   selected_category: RubroOption | null;
   product_chart: ReconciliationChart;
 };
+type ProductPageRequest = { offset: number; limit: number };
+type RubroChartRequestIdentity = {
+  costCenterCode: string;
+  rubro: string | null | undefined;
+  category: string | null | undefined;
+  productPage: ProductPageRequest | null;
+};
+function sameRubroChartRequest(left: RubroChartRequestIdentity, right: RubroChartRequestIdentity) {
+  return left.costCenterCode === right.costCenterCode
+    && left.rubro === right.rubro
+    && left.category === right.category
+    && (left.productPage === right.productPage || (left.productPage !== null && right.productPage !== null && left.productPage.offset === right.productPage.offset && left.productPage.limit === right.productPage.limit));
+}
 type ImportHistory = { items: { batch_id: string; source: string; cost_center: CostCenter; report_date: string; imported_at: string; imported_by_display_name: string | null; row_count: number; status: string; warning_counts: Record<string, number>; processing_counts: Record<string, number> }[]; page: Page };
 type ReviewQueue = { items: { id: string; category: string; cost_center: CostCenter; asset: { id: string; code: string | null } | null; source: { report_date: string }; reason: string; inference?: string }[]; queue_counts: Record<string, number>; page: Page };
 type CurrentStates = { states: { asset_id: string; asset_code: string; cost_center: CostCenter; state: string; reason: string; marker: { column: number; category: string; raw_value: string | null }; source_report_date: string; projection_version: string }[] };
@@ -290,7 +303,9 @@ function Dashboard() {
   const [rubroChartLoading, setRubroChartLoading] = useState(false);
   const [requestedRubro, setRequestedRubro] = useState<string | null | undefined>(undefined);
   const [requestedCategory, setRequestedCategory] = useState<string | null | undefined>(undefined);
-  const [productPageRequest, setProductPageRequest] = useState<{ offset: number; limit: number } | null>(null);
+  const [productPageRequest, setProductPageRequest] = useState<ProductPageRequest | null>(null);
+  const lastSuccessfulRubroRequest = useRef<RubroChartRequestIdentity | null>(null);
+  const rollbackRubroChartRequest = useRef<RubroChartRequestIdentity | null>(null);
 
   function selectCenter(code: string | null) {
     selectedCodeRef.current = code;
@@ -301,6 +316,8 @@ function Dashboard() {
     setRequestedRubro(undefined);
     setRequestedCategory(undefined);
     setProductPageRequest(null);
+    lastSuccessfulRubroRequest.current = null;
+    rollbackRubroChartRequest.current = null;
     setRubroChart(null);
     setRubroChartError(null);
   }
@@ -309,14 +326,12 @@ function Dashboard() {
     setRequestedRubro(value || null);
     setRequestedCategory(undefined);
     setProductPageRequest(null);
-    setRubroChart(null);
     setRubroChartError(null);
   }
 
   function selectCategory(value: string) {
     setRequestedCategory(value || null);
     setProductPageRequest(null);
-    setRubroChart(null);
     setRubroChartError(null);
   }
 
@@ -362,17 +377,34 @@ function Dashboard() {
 
   useEffect(() => {
     if (!selectedCode) return;
+    const currentRequest = { costCenterCode: selectedCode, rubro: requestedRubro, category: requestedCategory, productPage: productPageRequest };
+    const rollbackRequest = rollbackRubroChartRequest.current;
+    if (rollbackRequest) {
+      rollbackRubroChartRequest.current = null;
+      if (sameRubroChartRequest(currentRequest, rollbackRequest)) return;
+    }
     let active = true;
     setRubroChartLoading(true);
-    setRubroChart(null);
     setRubroChartError(null);
     const rubro = requestedRubro === undefined ? "" : `&rubro=${encodeURIComponent(requestedRubro ?? "")}`;
     const category = requestedCategory === undefined ? "" : `&category=${encodeURIComponent(requestedCategory ?? "")}`;
     const productPage = productPageRequest ? `&product_limit=${productPageRequest.limit}&product_offset=${productPageRequest.offset}` : "";
     request<RubroReconciliationResponse>(`/dashboard/rubro-reconciliation-chart?cost_center_code=${encodeURIComponent(selectedCode)}${rubro}${category}${productPage}`).then((response) => {
-      if (active) setRubroChart(response);
+      if (active) {
+        lastSuccessfulRubroRequest.current = currentRequest;
+        setRubroChart(response);
+      }
     }).catch((e: ApiError) => {
-      if (active) setRubroChartError(publicError(e));
+      if (!active) return;
+      setRubroChartLoading(false);
+      setRubroChartError(publicError(e));
+      const previousRequest = lastSuccessfulRubroRequest.current;
+      if (previousRequest) {
+        rollbackRubroChartRequest.current = previousRequest;
+        setRequestedRubro(previousRequest.rubro);
+        setRequestedCategory(previousRequest.category);
+        setProductPageRequest(previousRequest.productPage);
+      }
     }).finally(() => {
       if (active) setRubroChartLoading(false);
     });
@@ -401,7 +433,7 @@ function Dashboard() {
       {!drilldown && !drilldownError && <div className="loading-card" role="status">Cargando conciliación agrupada…</div>}
       <div className="dashboard-grid dashboard-grid-primary"><section className="panel chart-panel"><div className="panel-heading"><div><h2>Conciliación por rubro y categoría</h2><p>Encontrados, retornados y diferencia del corte seleccionado</p></div><span className="chip">Último corte</span></div>{drilldown ? <><StackedBars chart={drilldown.charts.primary_stacked_bar} /><ServerPagination page={drilldown.page} busy={drilldownLoading} label="Paginación del gráfico principal de conciliación" onNavigate={navigateDrilldown} /></> : <div className="chart-placeholder" />}</section><section className="panel chart-panel"><div className="panel-heading"><div><h2>Estado general</h2><p>Composición informada por el servidor</p></div><span className="chip">{percentage(selected.executive_metrics.coverage_percent)} cobertura</span></div><Donut chart={drilldown?.charts.general_status_donut || selected.charts.general_status_donut} /></section></div>
       <div className="dashboard-grid">{selected.charts.time_evolution.available && <section className="panel chart-panel"><div className="panel-heading"><div><h2>Evolución temporal</h2><p>Instantáneas comparables del centro seleccionado</p></div><span className="chip">Histórico</span></div><Evolution chart={selected.charts.time_evolution} /></section>}<OperationalIssues issues={drilldown?.operational_issues || selected.operational_issues} /></div>
-      <section className="panel rubro-chart-panel" aria-labelledby="rubro-chart-heading"><div className="panel-heading"><div><h2 id="rubro-chart-heading">Detalle de conciliación</h2><p>Seleccione un rubro, luego una categoría, para ver los productos y métricas informados por el servidor.</p></div><span className="chip">Por producto</span></div>{rubroChartLoading && <div className="loading-card" role="status">Cargando productos de la categoría…</div>}<ErrorNotice error={rubroChartError} />{rubroChart && <>{rubroChart.rubro_options.length === 0 ? <Empty>No hay rubros disponibles para este centro de costo.</Empty> : <div className="hierarchy-selectors"><label>Rubro<select value={rubroChart.selected_rubro?.value ?? ""} disabled={rubroChartLoading} onChange={(event) => selectRubro(event.target.value)}>{rubroChart.rubro_options.map((option) => <option key={option.value ?? "unassigned"} value={option.value ?? ""}>{option.label}</option>)}</select></label><label>Categoría<select value={rubroChart.selected_category?.value ?? ""} disabled={rubroChartLoading || rubroChart.category_options.length === 0} onChange={(event) => selectCategory(event.target.value)}>{rubroChart.category_options.map((option) => <option key={option.value ?? "unassigned"} value={option.value ?? ""}>{option.label}</option>)}</select></label></div>}<ProductBars chart={rubroChart.product_chart} />{rubroChart.product_chart.available && <ServerPagination page={rubroChart.product_chart.page} busy={rubroChartLoading} label="Paginación de productos de conciliación" onNavigate={(offset, limit) => setProductPageRequest({ offset, limit })} />}</>}</section>
+      <section className="panel rubro-chart-panel" aria-labelledby="rubro-chart-heading" aria-busy={rubroChartLoading}><div className="panel-heading"><div><h2 id="rubro-chart-heading">Detalle de conciliación</h2><p>Seleccione un rubro, luego una categoría, para ver los productos y métricas informados por el servidor.</p></div><span className="chip" role="status" aria-live="polite">{rubroChartLoading && rubroChart ? "Actualizando…" : "Por producto"}</span></div>{!rubroChart && rubroChartLoading && <div className="loading-card" role="status">Cargando productos de la categoría…</div>}<ErrorNotice error={rubroChartError} />{rubroChart && <>{rubroChart.rubro_options.length === 0 ? <Empty>No hay rubros disponibles para este centro de costo.</Empty> : <div className="hierarchy-selectors"><label>Rubro<select value={rubroChart.selected_rubro?.value ?? ""} disabled={rubroChartLoading} onChange={(event) => selectRubro(event.target.value)}>{rubroChart.rubro_options.map((option) => <option key={option.value ?? "unassigned"} value={option.value ?? ""}>{option.label}</option>)}</select></label><label>Categoría<select value={rubroChart.selected_category?.value ?? ""} disabled={rubroChartLoading || rubroChart.category_options.length === 0} onChange={(event) => selectCategory(event.target.value)}>{rubroChart.category_options.map((option) => <option key={option.value ?? "unassigned"} value={option.value ?? ""}>{option.label}</option>)}</select></label></div>}<ProductBars chart={rubroChart.product_chart} />{rubroChart.product_chart.available && <ServerPagination page={rubroChart.product_chart.page} busy={rubroChartLoading} label="Paginación de productos de conciliación" onNavigate={(offset, limit) => setProductPageRequest({ offset, limit })} />}</>}</section>
     </>}
     {data && <p className="metric-scope">{metricScopeLabel(data.metric_scope)}</p>}
   </section>;
