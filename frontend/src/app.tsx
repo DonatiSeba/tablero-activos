@@ -86,7 +86,6 @@ function sameRubroChartRequest(left: RubroChartRequestIdentity, right: RubroChar
     && (left.productPage === right.productPage || (left.productPage !== null && right.productPage !== null && left.productPage.offset === right.productPage.offset && left.productPage.limit === right.productPage.limit));
 }
 type ImportHistory = { items: { batch_id: string; source: string; cost_center: CostCenter; report_date: string; imported_at: string; imported_by_display_name: string | null; row_count: number; status: string; warning_counts: Record<string, number>; processing_counts: Record<string, number> }[]; page: Page };
-type ReviewQueue = { items: { id: string; category: string; cost_center: CostCenter; asset: { id: string; code: string | null } | null; source: { report_date: string }; reason: string; inference?: string }[]; queue_counts: Record<string, number>; page: Page };
 type CurrentStates = { states: { asset_id: string; asset_code: string; cost_center: CostCenter; state: string; reason: string; marker: { column: number; category: string; raw_value: string | null }; source_report_date: string; projection_version: string }[] };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -124,15 +123,11 @@ const metricScopeLabels: Record<string, string> = {
 };
 const sourceLabels: Record<string, string> = { system: "Sistema", audit: "Auditoría", return: "Retorno" };
 const importStatusLabels: Record<string, string> = { completed: "Completada", rejected: "Rechazada", failed: "Con errores" };
-const reviewCategoryLabels: Record<string, string> = { unresolved_identifier: "Identificador sin resolver", review_required_return: "Retorno que requiere revisión" };
 const stateLabels: Record<string, string> = {
   Active: "Activo", active: "Activo", Inactive: "Inactivo", inactive: "Inactivo", Retired: "Retirado", retired: "Retirado", in_service: "En servicio",
   found: "Encontrado en el centro de costo", returned: "Retornado", review_required: "Requiere revisión", pending: "Pendiente", matched: "Conciliado", mismatched: "No conciliado",
 };
 const reasonLabels: Record<string, string> = {
-  missing_identifier: "Falta el identificador del activo.",
-  no_normalized_candidate: "No se encontró un activo candidato con el identificador normalizado.",
-  ambiguous_normalized_candidate: "El identificador normalizado coincide con más de un activo.",
   authorized_post_audit_column_l_return_marker: "La marca de retorno de la columna L fue reconocida después de la auditoría; no constituye una recepción de almacén.",
   ambiguous_column_l_return_marker_requires_review: "La marca de retorno de la columna L es ambigua y requiere revisión.",
   resolved_audit_presence_without_recognized_return_marker: "El activo fue encontrado en la auditoría sin una marca de retorno reconocida.",
@@ -142,7 +137,6 @@ const chartLabels: Record<string, string> = { found_in_cost_center: "Encontrados
 function metricScopeLabel(scope: string) { return metricScopeLabels[scope] || "Los KPI y gráficos se calculan únicamente en el servidor a partir de la evidencia seleccionada."; }
 function sourceLabel(source: string) { return sourceLabels[source] || "Fuente no reconocida"; }
 function importStatusLabel(status: string) { return importStatusLabels[status] || "Estado de importación no reconocido"; }
-function reviewCategoryLabel(category: string) { return reviewCategoryLabels[category] || "Categoría de revisión no reconocida"; }
 function stateLabel(state: string | null) { return state === null ? "Sin estado informado" : stateLabels[state] || "Estado no reconocido"; }
 function reasonLabel(reason: string | null | undefined) { return reason ? reasonLabels[reason] || "El motivo informado no está reconocido." : "Sin motivo informado."; }
 function chartLabel(key: string) { return chartLabels[key] || "Serie no reconocida"; }
@@ -439,13 +433,23 @@ function Dashboard() {
   </section>;
 }
 
-function Operations() {
-  const [history, setHistory] = useState<ImportHistory | null>(null); const [queue, setQueue] = useState<ReviewQueue | null>(null); const [error, setError] = useState<string | null>(null);
-  useEffect(() => { Promise.all([request<ImportHistory>("/operations/import-history"), request<ReviewQueue>("/operations/review-queue")]).then(([h, q]) => { setHistory(h); setQueue(q); }).catch((e: ApiError) => setError(publicError(e))); }, []);
-  return <section aria-labelledby="operations-heading"><div className="page-heading"><div><p className="eyebrow">Seguimiento</p><h1 id="operations-heading">Operaciones</h1></div></div><ErrorNotice error={error} />{!history && !error && <p role="status" className="loading">Cargando registros operativos…</p>}
-    <section className="panel" aria-labelledby="history-heading"><h2 id="history-heading">Historial de importaciones</h2>{history?.items.length === 0 && <Empty>No hay importaciones para esta vista.</Empty>}<div className="table-scroll"><table><thead><tr><th>Fuente</th><th>Centro de costo</th><th>Fecha del reporte</th><th>Filas</th><th>Estado</th><th>Importado por</th></tr></thead><tbody>{history?.items.map((item) => <tr key={item.batch_id}><td>{sourceLabel(item.source)}</td><td>{item.cost_center.code}</td><td>{item.report_date}</td><td>{number(item.row_count)}</td><td><span className="status">{importStatusLabel(item.status)}</span></td><td>{item.imported_by_display_name || "No informado"}</td></tr>)}</tbody></table></div></section>
-    <section className="panel" aria-labelledby="queue-heading"><h2 id="queue-heading">Cola de revisión</h2>{queue && <p className="muted">Casos informados por el servidor: {number(queue.queue_counts.total ?? null)}. Esta pantalla no resuelve casos.</p>}{queue?.items.length === 0 && <Empty>No hay elementos que requieran revisión.</Empty>}<ul className="queue">{queue?.items.map((item) => <li key={item.id}><strong>{reviewCategoryLabel(item.category)}</strong> — CC {item.cost_center.code}{item.asset ? `, activo ${item.asset.code || "sin código"}` : ""}. {reasonLabel(item.reason)}</li>)}</ul></section>
-  </section>;
+function ImportHistoryPanel({ refreshVersion }: { refreshVersion: number }) {
+  const [history, setHistory] = useState<ImportHistory | null>(null); const [error, setError] = useState<string | null>(null); const [loading, setLoading] = useState(false); const requestVersion = useRef(0);
+  useEffect(() => {
+    let active = true;
+    const version = ++requestVersion.current;
+    setLoading(true);
+    setError(null);
+    request<ImportHistory>("/operations/import-history").then((response) => {
+      if (active && version === requestVersion.current) setHistory(response);
+    }).catch((e: ApiError) => {
+      if (active && version === requestVersion.current) setError(publicError(e));
+    }).finally(() => {
+      if (active && version === requestVersion.current) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [refreshVersion]);
+  return <section className="panel" aria-labelledby="history-heading" aria-busy={loading}><h2 id="history-heading">Historial de importaciones</h2><ErrorNotice error={error} />{loading && !history && <p role="status" className="loading">Cargando historial de importaciones…</p>}{history?.items.length === 0 && <Empty>No hay importaciones para esta vista.</Empty>}{history && <div className="table-scroll"><table><thead><tr><th>Fuente</th><th>Centro de costo</th><th>Fecha del reporte</th><th>Filas</th><th>Estado</th><th>Importado por</th></tr></thead><tbody>{history.items.map((item) => <tr key={item.batch_id}><td>{sourceLabel(item.source)}</td><td>{item.cost_center.code}</td><td>{item.report_date}</td><td>{number(item.row_count)}</td><td><span className="status">{importStatusLabel(item.status)}</span></td><td>{item.imported_by_display_name || "No informado"}</td></tr>)}</tbody></table></div>}</section>;
 }
 
 function CurrentStateList() {
@@ -455,16 +459,22 @@ function CurrentStateList() {
 }
 
 function Uploads() {
-  const [message, setMessage] = useState<string | null>(null); const [error, setError] = useState<string | null>(null); const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null); const [error, setError] = useState<string | null>(null); const [busy, setBusy] = useState(false); const [historyRefreshVersion, setHistoryRefreshVersion] = useState(0); const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   async function submit(event: FormEvent<HTMLFormElement>, endpoint: "/imports/system" | "/imports/audit") {
-    event.preventDefault(); setError(null); setMessage(null); setBusy(true);
-    try { const result = await request<{ source: string; row_count: number }>(endpoint, { method: "POST", body: new FormData(event.currentTarget) }); setMessage(`La importación de ${sourceLabel(result.source as Source["source"])} fue aceptada con ${number(result.row_count)} filas.`); event.currentTarget.reset(); }
-    catch (e) { setError(publicError(e as ApiError)); } finally { setBusy(false); }
+    event.preventDefault(); const form = event.currentTarget; setError(null); setMessage(null); setBusy(true);
+    try {
+      const result = await request<{ source: string; row_count: number }>(endpoint, { method: "POST", body: new FormData(form) });
+      if (!mounted.current) return;
+      setMessage(`La importación de ${sourceLabel(result.source as Source["source"])} fue aceptada con ${number(result.row_count)} filas.`);
+      form.reset();
+      setHistoryRefreshVersion((version) => version + 1);
+    } catch (e) { if (mounted.current) setError(publicError(e as ApiError)); } finally { if (mounted.current) setBusy(false); }
   }
   return <section aria-labelledby="uploads-heading"><div className="page-heading"><div><p className="eyebrow">Carga autorizada</p><h1 id="uploads-heading">Importar evidencia</h1><p className="muted">Los editores y administradores pueden enviar libros de origen. El servidor valida la aceptación y las coincidencias.</p></div></div><p className="notice" role="status" aria-live="polite">{message}</p><ErrorNotice error={error} /><div className="upload-grid">
     <form className="panel" onSubmit={(event) => submit(event, "/imports/system")}><h2>Reporte de sistema</h2><label>Libro de trabajo <input name="file" type="file" accept=".xlsx" required /></label><label>Fecha del reporte <input name="report_date" type="date" required /></label><button className="button-primary" disabled={busy}>{busy ? "Cargando…" : "Cargar reporte de sistema"}</button></form>
     <form className="panel" onSubmit={(event) => submit(event, "/imports/audit")}><h2>Auditoría física</h2><label>Libro de trabajo <input name="file" type="file" accept=".xlsx" required /></label><label>Fecha del reporte <input name="report_date" type="date" required /></label><label>Código de centro de costo <input name="cost_center_code" required /></label><button className="button-primary" disabled={busy}>{busy ? "Cargando…" : "Cargar auditoría"}</button></form>
-  </div></section>;
+  </div><ImportHistoryPanel refreshVersion={historyRefreshVersion} /></section>;
 }
 
 const managedRoles: { value: Role; label: string }[] = [
@@ -534,7 +544,7 @@ function PasswordChange({ forced = false, onChanged, onLogout }: { forced?: bool
   return <section className={forced ? "password-gate" : "password-page"} aria-labelledby="password-heading"><div className={forced ? "password-card" : "panel password-card"}><p className="eyebrow">Seguridad de la cuenta</p><h1 id="password-heading">{forced ? "Cambie su contraseña para continuar" : "Cambiar mi contraseña"}</h1><p>{forced ? "Está usando una contraseña temporal. Debe reemplazarla antes de acceder a la aplicación." : "Use su contraseña actual y elija una nueva de al menos 12 caracteres."}</p><form onSubmit={submit}><label>Contraseña actual <input name="current_password" type="password" autoComplete="current-password" required /></label><label>Nueva contraseña <input name="new_password" type="password" autoComplete="new-password" minLength={12} required /></label><button className="button-primary" disabled={busy}>{busy ? "Actualizando…" : "Cambiar contraseña"}</button></form><p className="notice" role="status" aria-live="polite">{message}</p><ErrorNotice error={error} />{forced && onLogout && <button className="text-button" type="button" onClick={onLogout}>Cerrar sesión</button>}</div></section>;
 }
 
-const navigationIcons = { dashboard: "◫", operations: "↔", states: "▣", uploads: "⇩", users: "♙", password: "◆" } as const;
+const navigationIcons = { dashboard: "◫", states: "▣", uploads: "⇩", users: "♙", password: "◆" } as const;
 const mobileNavigationQuery = "(max-width: 52rem)";
 function useMobileNavigation() {
   const [mobile, setMobile] = useState(() => window.matchMedia?.(mobileNavigationQuery).matches ?? false);
@@ -560,5 +570,5 @@ export function App() {
   const canUpload = user.role === "editor" || user.role === "admin"; const canManageUsers = user.role === "admin";
   const initials = user.display_name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
   const navigationUnavailable = mobileNavigation && !navigationOpen;
-  return <div className="app"><header className="mobile-header"><div className="mobile-brand"><img className="mobile-logo" src="/logo.svg" alt="TISICO" width="3340" height="1063" /></div><button className="menu-toggle" type="button" aria-label={navigationOpen ? "Cerrar navegación" : "Abrir navegación"} aria-expanded={navigationOpen} aria-controls="application-sidebar" onClick={() => setNavigationOpen((open) => !open)}><span aria-hidden="true">{navigationOpen ? "×" : "☰"}</span></button></header>{navigationOpen && <button className="nav-scrim" type="button" aria-label="Cerrar navegación al seleccionar fuera del menú" onClick={() => setNavigationOpen(false)} />}<aside id="application-sidebar" className={`sidebar${navigationOpen ? " sidebar-open" : ""}`} aria-hidden={navigationUnavailable || undefined} ref={(element) => element?.toggleAttribute("inert", navigationUnavailable)}><div className="brand"><img className="brand-logo" src="/logo.svg" alt="TISICO" width="3340" height="1063" /></div><nav aria-label="Aplicación"><p className="nav-label">Principal</p><button className={view === "dashboard" ? "active" : ""} onClick={() => navigate("dashboard")}><span className="nav-icon" aria-hidden="true">{navigationIcons.dashboard}</span>Dashboard</button><button className={view === "states" ? "active" : ""} onClick={() => navigate("states")}><span className="nav-icon" aria-hidden="true">{navigationIcons.states}</span>Estados actuales</button><p className="nav-label">Gestión</p><button className={view === "operations" ? "active" : ""} onClick={() => navigate("operations")}><span className="nav-icon" aria-hidden="true">{navigationIcons.operations}</span>Operaciones</button>{canUpload && <button className={view === "uploads" ? "active" : ""} onClick={() => navigate("uploads")}><span className="nav-icon" aria-hidden="true">{navigationIcons.uploads}</span>Importaciones</button>}{canManageUsers && <button className={view === "users" ? "active" : ""} onClick={() => navigate("users")}><span className="nav-icon" aria-hidden="true">{navigationIcons.users}</span>Usuarios</button>}<p className="nav-label">Cuenta</p><button className={view === "password" ? "active" : ""} onClick={() => navigate("password")}><span className="nav-icon" aria-hidden="true">{navigationIcons.password}</span>Mi contraseña</button></nav><div className="sidebar-user"><div className="avatar" aria-hidden="true">{initials}</div><div className="user-copy"><strong>{user.display_name}</strong><span>{roleLabel(user.role)}</span></div><button className="logout-button" type="button" onClick={logout}>Salir</button></div></aside><main className="content">{view === "dashboard" && <Dashboard />}{view === "operations" && <Operations />}{view === "states" && <CurrentStateList />}{view === "uploads" && canUpload && <Uploads />}{view === "users" && canManageUsers && <Users currentUser={user} onCurrentUserUpdated={setUser} />}{view === "password" && <PasswordChange onChanged={setUser} />}</main></div>;
+  return <div className="app"><header className="mobile-header"><div className="mobile-brand"><img className="mobile-logo" src="/logo.svg" alt="TISICO" width="3340" height="1063" /></div><button className="menu-toggle" type="button" aria-label={navigationOpen ? "Cerrar navegación" : "Abrir navegación"} aria-expanded={navigationOpen} aria-controls="application-sidebar" onClick={() => setNavigationOpen((open) => !open)}><span aria-hidden="true">{navigationOpen ? "×" : "☰"}</span></button></header>{navigationOpen && <button className="nav-scrim" type="button" aria-label="Cerrar navegación al seleccionar fuera del menú" onClick={() => setNavigationOpen(false)} />}<aside id="application-sidebar" className={`sidebar${navigationOpen ? " sidebar-open" : ""}`} aria-hidden={navigationUnavailable || undefined} ref={(element) => element?.toggleAttribute("inert", navigationUnavailable)}><div className="brand"><img className="brand-logo" src="/logo.svg" alt="TISICO" width="3340" height="1063" /></div><nav aria-label="Aplicación"><p className="nav-label">Principal</p><button className={view === "dashboard" ? "active" : ""} onClick={() => navigate("dashboard")}><span className="nav-icon" aria-hidden="true">{navigationIcons.dashboard}</span>Dashboard</button><button className={view === "states" ? "active" : ""} onClick={() => navigate("states")}><span className="nav-icon" aria-hidden="true">{navigationIcons.states}</span>Estados actuales</button><p className="nav-label">Gestión</p>{canUpload && <button className={view === "uploads" ? "active" : ""} onClick={() => navigate("uploads")}><span className="nav-icon" aria-hidden="true">{navigationIcons.uploads}</span>Importaciones</button>}{canManageUsers && <button className={view === "users" ? "active" : ""} onClick={() => navigate("users")}><span className="nav-icon" aria-hidden="true">{navigationIcons.users}</span>Usuarios</button>}<p className="nav-label">Cuenta</p><button className={view === "password" ? "active" : ""} onClick={() => navigate("password")}><span className="nav-icon" aria-hidden="true">{navigationIcons.password}</span>Mi contraseña</button></nav><div className="sidebar-user"><div className="avatar" aria-hidden="true">{initials}</div><div className="user-copy"><strong>{user.display_name}</strong><span>{roleLabel(user.role)}</span></div><button className="logout-button" type="button" onClick={logout}>Salir</button></div></aside><main className="content">{view === "dashboard" && <Dashboard />}{view === "states" && <CurrentStateList />}{view === "uploads" && canUpload && <Uploads />}{view === "users" && canManageUsers && <Users currentUser={user} onCurrentUserUpdated={setUser} />}{view === "password" && <PasswordChange onChanged={setUser} />}</main></div>;
 }

@@ -67,10 +67,9 @@ const rubroChart: RubroChartFixture = {
   },
 };
 const importHistory = { items: [{ batch_id: "batch-1", source: "system", cost_center: { code: "190", name: "Principal" }, report_date: "2026-09-17", imported_at: "2026-09-17T10:00:00Z", imported_by_display_name: "Usuario editor", row_count: 4, status: "completed", warning_counts: {}, processing_counts: {} }], page: {} };
-const reviewQueue = { items: [{ id: "case-1", category: "unresolved_identifier", cost_center: { code: "190", name: "Principal" }, asset: null, source: { report_date: "2026-09-17" }, reason: "missing_identifier" }], queue_counts: { total: 1 }, page: {} };
 const currentStates = { states: [{ asset_id: "asset-1", asset_code: "ACT-01", cost_center: { code: "190", name: "Principal" }, state: "returned", reason: "authorized_post_audit_column_l_return_marker", marker: { column: 12, category: "recognized_return", raw_value: "DEVOLVIO" }, source_report_date: "2026-09-17", projection_version: "audit_l_return_v1" }] };
 
-type FetchResponses = { summaries?: unknown; drilldown?: unknown; rubroChart?: unknown; importHistory?: unknown; reviewQueue?: unknown; currentStates?: unknown; users?: unknown };
+type FetchResponses = { summaries?: unknown; drilldown?: unknown; rubroChart?: unknown; importHistory?: unknown; currentStates?: unknown; users?: unknown };
 type ProductChartOption = {
   yAxis?: { data?: string[] };
   series?: { emphasis?: { focus?: unknown }; data: { value: number | null; emphasis: { focus: readonly number[] } }[] }[];
@@ -98,7 +97,6 @@ function installFetch(user: object | null = viewer, responses: FetchResponses = 
     if (url.startsWith("/api/dashboard/system-drilldown")) return json(responses.drilldown ?? drilldown);
     if (url.startsWith("/api/dashboard/rubro-reconciliation-chart")) return json(responses.rubroChart ?? rubroChart);
     if (url === "/api/operations/import-history") return json(responses.importHistory ?? importHistory);
-    if (url === "/api/operations/review-queue") return json(responses.reviewQueue ?? reviewQueue);
     if (url === "/api/current-states") return json(responses.currentStates ?? currentStates);
     if (url.startsWith("/api/imports/")) return json({ source: url.endsWith("system") ? "system" : "audit", row_count: 3 }, 201);
     if (url.startsWith("/api/users?")) return json(responses.users ?? usersResponse);
@@ -127,13 +125,27 @@ describe("sesión y vistas de presentación", () => {
     expect(localStorage.length).toBe(0);
   });
 
-  it("mantiene las importaciones autorizadas para editor y administrador", async () => {
+  it("elimina Operaciones para todos los roles y mantiene Importaciones sólo para editor y administrador", async () => {
     installFetch(viewer); const viewerView = render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
+    expect(screen.queryByRole("button", { name: "Operaciones" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Importaciones" })).not.toBeInTheDocument(); viewerView.unmount();
-    installFetch(editor); const editorView = render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
-    expect(screen.getByRole("button", { name: "Importaciones" })).toBeInTheDocument(); editorView.unmount();
+
+    const editorFetch = installFetch(editor); const editorView = render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
+    expect(screen.queryByRole("button", { name: "Operaciones" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
+    expect(await screen.findByRole("heading", { name: "Reporte de sistema" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Auditoría física" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Historial de importaciones" })).toBeInTheDocument();
+    await waitFor(() => expect(editorFetch.mock.calls.filter(([url]) => url === "/api/operations/import-history")).toHaveLength(1));
+    expect(editorFetch.mock.calls.some(([url]) => url === "/api/operations/review-queue")).toBe(false);
+    editorView.unmount();
+
     installFetch(admin); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
-    expect(screen.getByRole("button", { name: "Importaciones" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Operaciones" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
+    expect(await screen.findByRole("heading", { name: "Reporte de sistema" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Auditoría física" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Historial de importaciones" })).toBeInTheDocument();
   });
 
   it("solicita los filtros predeterminados sin parámetros y los reinicia al cambiar de centro", async () => {
@@ -292,13 +304,6 @@ describe("sesión y vistas de presentación", () => {
     expect(omissionCard).toHaveTextContent("2");
     expect(screen.queryByText("Casos de auditoría sin resolver")).not.toBeInTheDocument();
     expect(screen.queryByText("Omisiones de calidad del sistema")).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Operaciones" }));
-    expect(await screen.findByText("Sistema")).toBeInTheDocument();
-    expect(screen.getByText("Completada")).toBeInTheDocument();
-    const reviewCase = screen.getByText("Identificador sin resolver").closest("li");
-    expect(reviewCase).toHaveTextContent("Falta el identificador del activo.");
-    expect(screen.queryByText("missing_identifier")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Estados actuales" }));
     expect(await screen.findByText("Retornado")).toBeInTheDocument();
@@ -612,15 +617,42 @@ describe("sesión y vistas de presentación", () => {
     expect(screen.queryByText("Unavailable now")).not.toBeInTheDocument();
   });
 
-  it("envía la importación de sistema como multipart y anuncia el resultado localizado", async () => {
+  it("envía la importación de sistema como multipart, conserva el anuncio y refresca el historial", async () => {
     const fetchMock = installFetch(editor); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
     fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
+    await screen.findByRole("heading", { name: "Historial de importaciones" });
     const form = screen.getByRole("heading", { name: "Reporte de sistema" }).closest("form")!;
     fireEvent.change(within(form).getByLabelText("Libro de trabajo"), { target: { files: [new File(["workbook"], "report.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })] } });
     fireEvent.change(within(form).getByLabelText("Fecha del reporte"), { target: { value: "2026-09-17" } }); fireEvent.submit(form);
     expect(await screen.findByText("La importación de Sistema fue aceptada con 3 filas.")).toBeInTheDocument();
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/imports/system", expect.objectContaining({ method: "POST", credentials: "include" })));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === "/api/operations/import-history")).toHaveLength(2));
+    expect(screen.getByText("La importación de Sistema fue aceptada con 3 filas.")).toBeInTheDocument();
     const uploadCall = fetchMock.mock.calls.find(([url]) => url === "/api/imports/system"); expect(uploadCall?.[1]?.body).toBeInstanceOf(FormData);
+  });
+
+  it("mantiene los formularios habilitados y separa los errores de historial y carga", async () => {
+    const fetchMock = installFetch(editor);
+    const defaultFetch = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => url === "/api/operations/import-history"
+      ? json({ detail: "history outage" }, 503)
+      : url === "/api/imports/system"
+        ? json({ detail: "upload outage" }, 422)
+        : defaultFetch(url, init));
+    render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
+    fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("No se pudo completar la solicitud. Intente nuevamente.");
+    const form = screen.getByRole("heading", { name: "Reporte de sistema" }).closest("form")!;
+    expect(within(form).getByRole("button", { name: "Cargar reporte de sistema" })).toBeEnabled();
+    fireEvent.change(within(form).getByLabelText("Libro de trabajo"), { target: { files: [new File(["workbook"], "report.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })] } });
+    fireEvent.change(within(form).getByLabelText("Fecha del reporte"), { target: { value: "2026-09-17" } }); fireEvent.submit(form);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/imports/system", expect.objectContaining({ method: "POST", credentials: "include" })));
+    expect(screen.getAllByRole("alert")).toHaveLength(2);
+    expect(screen.getAllByRole("alert").map((notice) => notice.textContent)).toEqual(expect.arrayContaining([
+      "No se pudo completar la solicitud. Intente nuevamente.",
+      "Revise los datos ingresados e intente nuevamente.",
+    ]));
+    expect(within(form).getByRole("button", { name: "Cargar reporte de sistema" })).toBeEnabled();
   });
 
   it("reserva Usuarios para ADMIN y ofrece el cambio de contraseña a toda cuenta", async () => {
