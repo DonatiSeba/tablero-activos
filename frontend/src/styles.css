@@ -125,8 +125,8 @@ dd { margin: .15rem 0 0; color: var(--text); font-weight: 800; }
 .issue-grid .metric-icon { width: 27px; height: 27px; flex-basis: 27px; }
 
 .rubro-chart-panel { overflow: hidden; }
-.rubro-select { margin: 0 18px 14px; }
-.category-chart-scroll { max-height: 42rem; overflow: auto; overscroll-behavior: contain; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.hierarchy-selectors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 0 18px 14px; }
+.product-chart-scroll { max-height: 42rem; overflow: auto; overscroll-behavior: contain; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .table-scroll { overflow-x: auto; }
 table { width: 100%; min-width: 46rem; border-collapse: collapse; background: #fff; }
 th, td { padding: .72rem 1rem; border-bottom: 1px solid #f0f3f7; text-align: left; vertical-align: middle; }
@@ -205,7 +205,7 @@ tbody tr:hover { background: #f9fbfe; }
   .executive-metrics { grid-template-columns: 1fr; }
   .supporting-metrics { align-items: stretch; flex-direction: column; }
   .supporting-metrics div { justify-content: space-between; }
-  .sources, .upload-grid, .user-management-grid { grid-template-columns: 1fr; }
+  .sources, .upload-grid, .user-management-grid, .hierarchy-selectors { grid-template-columns: 1fr; }
   .temporary-password { align-items: stretch; flex-direction: column; }
   .temporary-password-actions { flex-direction: column; }
   .context-card { min-width: 0; padding: 14px; }

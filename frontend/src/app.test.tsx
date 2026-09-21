@@ -12,7 +12,7 @@ const admin = { ...viewer, role: "admin", display_name: "Usuario administrador" 
 const managedViewer = { ...viewer, id: "u2", email: "viewer@example.test", is_active: true, created_at: "2026-09-20T10:00:00Z", updated_at: "2026-09-20T10:00:00Z" };
 const usersResponse = { items: [managedViewer], total: 1, limit: 20, offset: 0 };
 const executiveMetrics = { system_count: 4, found_in_cost_center_count: 2, returned_count: 1, accounted_count: 3, difference_count: 1, coverage_percent: 75 };
-const operationalIssues = { physical_patrimonial_difference_count: 1, system_update_required_return_count: 1, system_data_quality_omission_count: 0, review_required_count: 0, unresolved_audit_case_count: 1 };
+const operationalIssues = { physical_patrimonial_difference_count: 1, system_update_required_return_count: 1, system_data_quality_omission_count: 0, review_required_count: 0, unresolved_audit_case_count: 1, not_in_management_system_for_cost_center_count: 2 };
 type TemporalFixture = {
   available: boolean;
   reason?: string;
@@ -42,21 +42,27 @@ type RubroChartFixture = {
   cost_center: { code: string; name: string };
   rubro_options: { value: string | null; label: string }[];
   selected_rubro: { value: string | null; label: string } | null;
-  category_chart: {
+  category_options: { value: string | null; label: string }[];
+  selected_category: { value: string | null; label: string } | null;
+  product_chart: {
     available: boolean;
     reason: string | null;
     series: { key: string; label: string }[];
-    items: { category: string | null; category_label: string; found_in_cost_center_count: number | null; returned_count: number | null; difference_count: number | null }[];
+    items: { product: string | null; product_label: string; found_in_cost_center_count: number | null; returned_count: number | null; difference_count: number | null }[];
+    page: { limit: number; offset: number; has_more: boolean; total_count: number };
   };
 };
 const rubroChart: RubroChartFixture = {
   cost_center: { code: "190", name: "Principal" },
   rubro_options: [{ value: "Rubro & Ácento", label: "Rubro & Ácento" }, { value: null, label: "Sin rubro asignado" }],
   selected_rubro: { value: "Rubro & Ácento", label: "Rubro & Ácento" },
-  category_chart: {
+  category_options: [{ value: "Categoría & Ácento", label: "Categoría & Ácento" }, { value: null, label: "Sin categoría asignada" }],
+  selected_category: { value: "Categoría & Ácento", label: "Categoría & Ácento" },
+  product_chart: {
     available: true, reason: null,
     series: [{ key: "found_in_cost_center_count", label: "found_in_cost_center" }, { key: "returned_count", label: "returned" }, { key: "difference_count", label: "difference" }],
-    items: [{ category: null, category_label: "Sin categoría asignada", found_in_cost_center_count: 7, returned_count: 3, difference_count: 2 }, { category: "Muebles", category_label: "Muebles", found_in_cost_center_count: 4, returned_count: 1, difference_count: 5 }],
+    items: [{ product: null, product_label: "Sin producto asignado", found_in_cost_center_count: 7, returned_count: 3, difference_count: 2 }, { product: "Mesa", product_label: "Mesa", found_in_cost_center_count: 4, returned_count: 1, difference_count: 5 }],
+    page: { limit: 50, offset: 0, has_more: false, total_count: 2 },
   },
 };
 const importHistory = { items: [{ batch_id: "batch-1", source: "system", cost_center: { code: "190", name: "Principal" }, report_date: "2026-09-17", imported_at: "2026-09-17T10:00:00Z", imported_by_display_name: "Usuario editor", row_count: 4, status: "completed", warning_counts: {}, processing_counts: {} }], page: {} };
@@ -121,7 +127,7 @@ describe("sesión y vistas de presentación", () => {
     expect(screen.getByRole("button", { name: "Importaciones" })).toBeInTheDocument();
   });
 
-  it("solicita el rubro predeterminado sin parámetro y lo reinicia al cambiar de centro", async () => {
+  it("solicita los filtros predeterminados sin parámetros y los reinicia al cambiar de centro", async () => {
     const multipleSummaries = structuredClone(summary);
     multipleSummaries.summaries.push({ ...structuredClone(summary.summaries[0]), cost_center: { code: "191", name: "Centro secundario" } });
     const fetchMock = installFetch(viewer, { summaries: multipleSummaries }); render(<App />);
@@ -129,8 +135,9 @@ describe("sesión y vistas de presentación", () => {
     expect(selector).toHaveValue("190");
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190", expect.objectContaining({ credentials: "include" })));
     expect(await screen.findByLabelText("Rubro")).toHaveValue("Rubro & Ácento");
+    expect(screen.getByLabelText("Categoría")).toHaveValue("Categoría & Ácento");
     fireEvent.change(selector, { target: { value: "191" } });
-    expect(screen.queryByRole("img", { name: "Barras agrupadas de conciliación por categoría" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Barras agrupadas de conciliación por producto" })).not.toBeInTheDocument();
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=191", expect.objectContaining({ credentials: "include" })));
   });
 
@@ -195,6 +202,33 @@ describe("sesión y vistas de presentación", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/system-drilldown?cost_center_code=190&limit=1&offset=1", expect.objectContaining({ credentials: "include" })));
   });
 
+  it("pagina productos después de la agrupación del servidor y reinicia la página al cambiar la categoría", async () => {
+    const firstPage = structuredClone(rubroChart);
+    firstPage.product_chart.page = { limit: 1, offset: 0, has_more: true, total_count: 2 };
+    firstPage.product_chart.items = [firstPage.product_chart.items[0]];
+    const secondPage = structuredClone(firstPage);
+    secondPage.product_chart.page = { limit: 1, offset: 1, has_more: false, total_count: 2 };
+    secondPage.product_chart.items = [rubroChart.product_chart.items[1]];
+    const fetchMock = vi.fn((url: string) => {
+      if (url === "/api/auth/me") return json(viewer);
+      if (url === "/api/dashboard/summaries") return json(summary);
+      if (url.startsWith("/api/dashboard/system-drilldown")) return json(drilldown);
+      if (url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=190") return json(firstPage);
+      if (url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&product_limit=1&product_offset=1") return json(secondPage);
+      if (url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&category=Categor%C3%ADa%20%26%20%C3%81cento") return json(firstPage);
+      return json({}, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock); render(<App />);
+
+    const navigation = await screen.findByRole("navigation", { name: "Paginación de productos de conciliación" });
+    fireEvent.click(within(navigation).getByRole("button", { name: "Siguiente" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&product_limit=1&product_offset=1", expect.objectContaining({ credentials: "include" })));
+    await waitFor(() => expect(setOptionMock).toHaveBeenCalledWith(expect.objectContaining({ yAxis: expect.objectContaining({ data: ["Mesa"] }) })));
+
+    fireEvent.change(screen.getByLabelText("Categoría"), { target: { value: "Categoría & Ácento" } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&category=Categor%C3%ADa%20%26%20%C3%81cento", expect.objectContaining({ credentials: "include" })));
+  });
+
   it("oculta semánticamente la navegación móvil cerrada y la restaura al abrirla", async () => {
     installViewport(true); installFetch(); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
     const sidebar = document.getElementById("application-sidebar")!;
@@ -242,10 +276,13 @@ describe("sesión y vistas de presentación", () => {
     expect(screen.getByText("Los estados y las diferencias se calculan sobre activos distintos del lote de sistema seleccionado. Los estados de auditoría son proyecciones del lote de auditoría seleccionado. Los KPI y gráficos se calculan únicamente en el servidor.")).toBeInTheDocument();
     expect(screen.queryByText(summary.metric_scope)).not.toBeInTheDocument();
 
-    expect(await screen.findByRole("img", { name: "Barras agrupadas de conciliación por categoría" })).toBeInTheDocument();
+    expect(await screen.findByRole("img", { name: "Barras agrupadas de conciliación por producto" })).toBeInTheDocument();
     expect(screen.queryByText("Active")).not.toBeInTheDocument();
     expect(screen.getByText("Casos pendientes de revisión")).toBeInTheDocument();
-    expect(screen.getByText("Casos de auditoría sin resolver")).toBeInTheDocument();
+    const omissionCard = screen.getByText("No figuran en el sistema de gestión para este CC").closest(".metric");
+    expect(omissionCard).toHaveTextContent("2");
+    expect(screen.queryByText("Casos de auditoría sin resolver")).not.toBeInTheDocument();
+    expect(screen.queryByText("Omisiones de calidad del sistema")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Operaciones" }));
     expect(await screen.findByText("Sistema")).toBeInTheDocument();
@@ -259,7 +296,14 @@ describe("sesión y vistas de presentación", () => {
     expect(screen.getByText("La marca de retorno de la columna L fue reconocida después de la auditoría; no constituye una recepción de almacén.")).toBeInTheDocument();
   });
 
-  it("renderiza el gráfico temporal y avisa cuando la evolución de retornos no está disponible", async () => {
+  it("omite el panel de evolución temporal cuando el servidor lo marca no disponible", async () => {
+    installFetch(); render(<App />);
+    await screen.findByRole("heading", { name: "Conciliación de activos" });
+    expect(screen.queryByRole("heading", { name: "Evolución temporal" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Aún no hay dos instantáneas comparables para mostrar una evolución.")).not.toBeInTheDocument();
+  });
+
+  it("renderiza el panel temporal cuando el servidor entrega instantáneas comparables", async () => {
     const temporalSummary = structuredClone(summary);
     temporalSummary.summaries[0].charts.time_evolution = {
       available: true,
@@ -270,58 +314,90 @@ describe("sesión y vistas de presentación", () => {
       return_evolution: { available: false, reason: "return_event_time_evidence_unavailable", points: [] },
     };
     installFetch(viewer, { summaries: temporalSummary }); render(<App />);
-    expect(await screen.findByRole("img", { name: "Evolución temporal de las instantáneas comparables" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Evolución temporal" })).toBeInTheDocument();
+    expect(screen.getByText("Instantáneas comparables del centro seleccionado")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Evolución temporal de las instantáneas comparables" })).toBeInTheDocument();
     expect(screen.getByText("La evolución de retornos no está disponible porque no existe evidencia temporal de esos eventos.")).toBeInTheDocument();
     expect(screen.queryByText("return_event_time_evidence_unavailable")).not.toBeInTheDocument();
   });
 
-  it("renderiza las barras agrupadas con las etiquetas y valores que entrega el servidor", async () => {
+  it("renderiza los productos y valores que entrega el servidor sin calcularlos", async () => {
     installFetch(); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
-    expect(await screen.findByRole("img", { name: "Barras agrupadas de conciliación por categoría" })).toBeInTheDocument();
+    expect(await screen.findByRole("img", { name: "Barras agrupadas de conciliación por producto" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Sin rubro asignado" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Sin categoría asignada" })).toBeInTheDocument();
     await waitFor(() => expect(setOptionMock).toHaveBeenCalledWith(expect.objectContaining({
-      yAxis: expect.objectContaining({ data: ["Sin categoría asignada", "Muebles"] }),
+      yAxis: expect.objectContaining({ data: ["Sin producto asignado", "Mesa"] }),
       series: [expect.objectContaining({ data: [7, 4] }), expect.objectContaining({ data: [3, 1] }), expect.objectContaining({ data: [2, 5] })],
     })));
     expect(screen.queryByRole("table", { name: /detalle/i })).not.toBeInTheDocument();
   });
 
-  it("codifica rubros nombrados y representa la selección nula explícita", async () => {
+  it("mantiene los productos de alta cardinalidad dentro de un área desplazable", async () => {
+    const highCardinality = structuredClone(rubroChart);
+    highCardinality.product_chart.items = Array.from({ length: 51 }, (_, index) => ({ product: `Producto ${index + 1}`, product_label: `Producto ${index + 1}`, found_in_cost_center_count: index, returned_count: index + 1, difference_count: index + 2 }));
+    highCardinality.product_chart.page = { limit: 51, offset: 0, has_more: true, total_count: 102 };
+    installFetch(viewer, { rubroChart: highCardinality }); render(<App />);
+    const chart = await screen.findByRole("img", { name: "Barras agrupadas de conciliación por producto" });
+    expect(chart).toHaveStyle({ height: "2530px" });
+    expect(chart.parentElement).toHaveClass("product-chart-scroll");
+    expect(screen.getByRole("navigation", { name: "Paginación de productos de conciliación" })).toBeInTheDocument();
+  });
+
+  it("codifica rubros y categorías nombrados, conserva null explícito y reinicia la categoría", async () => {
     const fetchMock = installFetch(); render(<App />);
     const rubroSelector = await screen.findByLabelText("Rubro");
     fireEvent.change(rubroSelector, { target: { value: "" } });
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=", expect.objectContaining({ credentials: "include" })));
     fireEvent.change(await screen.findByLabelText("Rubro"), { target: { value: "Rubro & Ácento" } });
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=Rubro%20%26%20%C3%81cento", expect.objectContaining({ credentials: "include" })));
+    fireEvent.change(await screen.findByLabelText("Categoría"), { target: { value: "" } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=Rubro%20%26%20%C3%81cento&category=", expect.objectContaining({ credentials: "include" })));
+    fireEvent.change(await screen.findByLabelText("Categoría"), { target: { value: "Categoría & Ácento" } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=Rubro%20%26%20%C3%81cento&category=Categor%C3%ADa%20%26%20%C3%81cento", expect.objectContaining({ credentials: "include" })));
+    fireEvent.change(await screen.findByLabelText("Rubro"), { target: { value: "" } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=", expect.objectContaining({ credentials: "include" })));
   });
 
-  it("muestra los estados localizados del contrato de rubro y no expone motivos crudos", async () => {
+  it("muestra los estados localizados del contrato de producto y no expone motivos crudos", async () => {
     const unavailable = structuredClone(rubroChart);
     unavailable.rubro_options = [];
     unavailable.selected_rubro = null;
-    unavailable.category_chart = { ...unavailable.category_chart, available: false, reason: "missing_system_evidence", items: [] };
+    unavailable.product_chart = { ...unavailable.product_chart, available: false, reason: "missing_system_evidence", items: [] };
     installFetch(viewer, { rubroChart: unavailable }); const systemView = render(<App />);
     expect(await screen.findByText("No hay evidencia vigente de sistema para mostrar rubros y categorías.")).toBeInTheDocument();
     expect(screen.queryByText("missing_system_evidence")).not.toBeInTheDocument();
     systemView.unmount();
 
     const auditUnavailable = structuredClone(rubroChart);
-    auditUnavailable.category_chart = { ...auditUnavailable.category_chart, available: false, reason: "missing_audit_evidence", items: [] };
+    auditUnavailable.product_chart = { ...auditUnavailable.product_chart, available: false, reason: "missing_audit_evidence", items: [] };
     installFetch(viewer, { rubroChart: auditUnavailable }); const auditView = render(<App />);
-    expect(await screen.findByText("No hay evidencia vigente de auditoría para conciliar las categorías seleccionadas.")).toBeInTheDocument();
+    expect(await screen.findByText("No hay evidencia vigente de auditoría para conciliar los productos seleccionados.")).toBeInTheDocument();
     auditView.unmount();
 
     const invalid = structuredClone(rubroChart);
-    invalid.category_chart = { ...invalid.category_chart, available: false, reason: "invalid_rubro_selection", items: [] };
+    invalid.product_chart = { ...invalid.product_chart, available: false, reason: "invalid_rubro_selection", items: [] };
     installFetch(viewer, { rubroChart: invalid }); const invalidView = render(<App />);
     expect(await screen.findByText("El rubro seleccionado ya no está disponible para este centro de costo.")).toBeInTheDocument();
     expect(screen.queryByText("invalid_rubro_selection")).not.toBeInTheDocument();
     invalidView.unmount();
 
+    const invalidCategory = structuredClone(rubroChart);
+    invalidCategory.product_chart = { ...invalidCategory.product_chart, available: false, reason: "invalid_category_selection", items: [] };
+    installFetch(viewer, { rubroChart: invalidCategory }); const categoryView = render(<App />);
+    expect(await screen.findByText("La categoría seleccionada ya no está disponible para este rubro.")).toBeInTheDocument();
+    categoryView.unmount();
+
     const empty = structuredClone(rubroChart);
-    empty.category_chart = { ...empty.category_chart, available: false, reason: "empty_rubro", items: [] };
-    installFetch(viewer, { rubroChart: empty }); render(<App />);
+    empty.product_chart = { ...empty.product_chart, available: false, reason: "empty_rubro", items: [] };
+    installFetch(viewer, { rubroChart: empty }); const emptyRubroView = render(<App />);
     expect(await screen.findByText("El rubro seleccionado no tiene categorías para mostrar.")).toBeInTheDocument();
+    emptyRubroView.unmount();
+
+    const emptyProducts = structuredClone(rubroChart);
+    emptyProducts.product_chart.items = [];
+    installFetch(viewer, { rubroChart: emptyProducts }); render(<App />);
+    expect(await screen.findByText("No hay productos para la categoría seleccionada.")).toBeInTheDocument();
   });
 
   it("muestra un error seguro al cargar el gráfico de rubro", async () => {
@@ -347,10 +423,10 @@ describe("sesión y vistas de presentación", () => {
     });
     vi.stubGlobal("fetch", fetchMock); render(<App />);
     const centerSelector = await screen.findByLabelText("Centro de costo");
-    expect(await screen.findByText("Cargando categorías del rubro…")).toBeInTheDocument();
+    expect(await screen.findByText("Cargando productos de la categoría…")).toBeInTheDocument();
     fireEvent.change(centerSelector, { target: { value: "191" } });
-    expect(screen.queryByRole("img", { name: "Barras agrupadas de conciliación por categoría" })).not.toBeInTheDocument();
-    expect(await screen.findByRole("img", { name: "Barras agrupadas de conciliación por categoría" })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Barras agrupadas de conciliación por producto" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("img", { name: "Barras agrupadas de conciliación por producto" })).toBeInTheDocument();
     const stale = structuredClone(rubroChart);
     stale.rubro_options = [{ value: "Obsoleto", label: "Obsoleto" }];
     stale.selected_rubro = stale.rubro_options[0];
