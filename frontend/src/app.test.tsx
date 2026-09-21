@@ -104,7 +104,7 @@ describe("sesión y vistas de presentación", () => {
 
   it("muestra el inicio de sesión en español y accede sin almacenamiento local", async () => {
     const fetchMock = installFetch(null); render(<App />);
-    expect(await screen.findByRole("heading", { name: "Iniciar sesión" })).toBeInTheDocument();
+    expect(await screen.findByRole("form", { name: "Iniciar sesión" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Usuario"), { target: { value: "alex" } }); fireEvent.change(screen.getByLabelText("Contraseña"), { target: { value: "secret" } });
     fireEvent.click(screen.getByRole("button", { name: "Ingresar" }));
     expect(await screen.findByText("Usuario visor")).toBeInTheDocument();
