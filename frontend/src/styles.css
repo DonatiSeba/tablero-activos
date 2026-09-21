@@ -183,7 +183,6 @@ tbody tr:hover { background: #f9fbfe; }
 .application-shell, .login-card { width: min(100% - 2rem, 32rem); margin: 12vh auto; border-radius: 20px; padding: 2rem; background: #fff; box-shadow: 0 1.2rem 3rem rgb(9 15 27 / 18%); }
 .login-shell { min-height: 100vh; display: grid; align-items: start; overflow: auto; background: linear-gradient(135deg, #131b2b, #1d2c4a); }
 .login-brand { margin-bottom: 2rem; }
-.login-card > p:not(.eyebrow):not(.notice) { color: var(--muted); font-size: .86rem; }
 
 @keyframes card-enter { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 @keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
