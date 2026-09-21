@@ -5,13 +5,13 @@ from decimal import Decimal
 
 import httpx
 import pytest
-from sqlalchemy import create_engine, literal, select
+from sqlalchemy import create_engine, event, literal, select
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.app.auth import password_hasher
-from backend.app.dashboard import _ordered_distinct_rubros
+from backend.app.dashboard import _ordered_distinct_categories, _ordered_distinct_rubros
 from backend.app.db import Base, get_db
 from backend.app.main import app
 from backend.app.models import (
@@ -167,6 +167,7 @@ def test_dashboard_contracts_aggregate_server_data_and_redact_evidence(database:
         "review_required_count": 1,
         "unresolved_audit_case_count": 1,
         "audit_only_matched_asset_count": 1,
+        "not_in_management_system_for_cost_center_count": 2,
         "pending_not_accounted_count": 1,
     }
     assert summary["executive_metrics"] == {
@@ -183,6 +184,7 @@ def test_dashboard_contracts_aggregate_server_data_and_redact_evidence(database:
         "system_data_quality_omission_count": 1,
         "review_required_count": 1,
         "unresolved_audit_case_count": 1,
+        "not_in_management_system_for_cost_center_count": 2,
     }
     donut = summary["charts"]["general_status_donut"]
     assert donut["available"] is True
@@ -211,6 +213,122 @@ def test_dashboard_contracts_aggregate_server_data_and_redact_evidence(database:
     assert "sha256" not in str(history.json()) and "storage_path" not in str(history.json()) and "private.xlsx" not in str(history.json())
     assert queue.json()["queue_counts"] == {"unresolved_identifier": 1, "review_required_return": 1, "total": 2}
     assert queue.json()["page"]["has_more"] is True
+
+
+def test_dashboard_counts_selected_system_omissions_without_other_cost_center_disclosure(database: sessionmaker[Session]) -> None:
+    populate(database)
+    with database() as db:
+        center = db.scalar(select(CostCenter).where(CostCenter.code == "190"))
+        audit = db.scalar(
+            select(ImportBatch)
+            .where(ImportBatch.cost_center_id == center.id, ImportBatch.source == ImportSource.AUDIT)
+            .order_by(ImportBatch.report_date.desc(), ImportBatch.id.desc())
+        )
+        audit_only_asset = db.scalar(select(Asset).where(Asset.original_code == "C-1"))
+        other_center = CostCenter(code="191", name="Other cost center")
+        db.add(other_center)
+        db.flush()
+        other_system = _batch(db, other_center, ImportSource.SYSTEM, date(2026, 6, 30), 4)
+        db.add(
+            AssetObservation(
+                import_batch_id=other_system.id,
+                source=ImportSource.SYSTEM,
+                event=ObservationEvent.SNAPSHOT,
+                observed_on=other_system.report_date,
+                asset_id=audit_only_asset.id,
+                cost_center_id=other_center.id,
+                original_data=_system_data("Other", "Other", "Other"),
+                quantity=Decimal("9"),
+            )
+        )
+        duplicate_observation = AssetObservation(
+            import_batch_id=audit.id,
+            source=ImportSource.AUDIT,
+            event=ObservationEvent.SNAPSHOT,
+            observed_on=audit.report_date,
+            cost_center_id=center.id,
+            original_data={"cells": []},
+            quantity=Decimal("9"),
+        )
+        db.add(duplicate_observation)
+        db.flush()
+        db.add(
+            ReconciliationCase(
+                audit_observation_id=duplicate_observation.id,
+                cost_center_id=center.id,
+                candidate_asset_id=audit_only_asset.id,
+                match_strategy=AuditMatchStrategy.EXACT_ORIGINAL_CODE,
+            )
+        )
+        db.commit()
+
+    async def exercise() -> httpx.Response:
+        api = await client()
+        try:
+            assert (await api.post("/api/auth/login", json={"username": "viewer", "password": "password"})).status_code == 200
+            return await api.get("/api/dashboard/summaries?cost_center_code=190")
+        finally:
+            await api.aclose()
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 200
+    summary = response.json()["summaries"][0]
+    assert summary["cost_center"] == {"code": "190", "name": "Operations"}
+    assert "Other cost center" not in str(summary)
+    assert summary["metrics"]["audit_only_matched_asset_count"] == 1
+    assert summary["metrics"]["unresolved_audit_case_count"] == 1
+    assert summary["metrics"]["not_in_management_system_for_cost_center_count"] == 2
+    assert summary["operational_issues"]["not_in_management_system_for_cost_center_count"] == 2
+
+
+def test_dashboard_omission_count_is_unavailable_when_a_selected_source_is_missing(database: sessionmaker[Session]) -> None:
+    populate(database)
+    with database() as db:
+        audit_only_center = CostCenter(code="191", name="Audit only")
+        system_only_center = CostCenter(code="192", name="System only")
+        db.add_all((audit_only_center, system_only_center))
+        db.flush()
+        audit = _batch(db, audit_only_center, ImportSource.AUDIT, date(2026, 7, 1), 4)
+        observation = AssetObservation(
+            import_batch_id=audit.id,
+            source=ImportSource.AUDIT,
+            event=ObservationEvent.SNAPSHOT,
+            observed_on=audit.report_date,
+            cost_center_id=audit_only_center.id,
+            original_data={"cells": []},
+            quantity=Decimal("9"),
+        )
+        system = _batch(db, system_only_center, ImportSource.SYSTEM, date(2026, 7, 1), 5)
+        db.add_all((observation, AssetObservation(
+            import_batch_id=system.id,
+            source=ImportSource.SYSTEM,
+            event=ObservationEvent.SNAPSHOT,
+            observed_on=system.report_date,
+            cost_center_id=system_only_center.id,
+            original_data=_system_data("System", "System", "System"),
+            quantity=Decimal("9"),
+        )))
+        db.flush()
+        db.add(ReconciliationCase(audit_observation_id=observation.id, cost_center_id=audit_only_center.id, match_reason=AuditMatchReason.MISSING_IDENTIFIER))
+        db.commit()
+
+    async def exercise() -> tuple[httpx.Response, httpx.Response]:
+        api = await client()
+        try:
+            assert (await api.post("/api/auth/login", json={"username": "viewer", "password": "password"})).status_code == 200
+            return (
+                await api.get("/api/dashboard/summaries?cost_center_code=191"),
+                await api.get("/api/dashboard/summaries?cost_center_code=192"),
+            )
+        finally:
+            await api.aclose()
+
+    audit_only, system_only = asyncio.run(exercise())
+    assert audit_only.status_code == system_only.status_code == 200
+    for response in (audit_only, system_only):
+        summary = response.json()["summaries"][0]
+        assert summary["metrics"]["not_in_management_system_for_cost_center_count"] is None
+        assert summary["operational_issues"]["not_in_management_system_for_cost_center_count"] is None
 
 
 def test_read_pagination_filters_and_empty_drilldown_are_bounded(database: sessionmaker[Session]) -> None:
@@ -549,20 +667,32 @@ def test_system_drilldown_paginates_high_cardinality_leaf_groups_before_nesting(
     ]
 
 
-def test_rubro_options_compile_with_distinct_inside_postgresql_ordering_query() -> None:
-    leaf_rows = select(literal("rubro").label("rubro")).subquery("leaf_rows")
+def test_hierarchy_options_compile_with_distinct_inside_postgresql_ordering_queries() -> None:
+    rubro_rows = select(literal("rubro").label("rubro")).subquery("rubro_rows")
+    category_rows = select(literal("rubro").label("rubro"), literal("category").label("category")).subquery("category_rows")
 
-    sql = " ".join(
+    rubro_sql = " ".join(
         str(
-            _ordered_distinct_rubros(leaf_rows).compile(
+            _ordered_distinct_rubros(rubro_rows).compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        ).split()
+    )
+    category_sql = " ".join(
+        str(
+            _ordered_distinct_categories(category_rows, "rubro").compile(
                 dialect=postgresql.dialect(),
                 compile_kwargs={"literal_binds": True},
             )
         ).split()
     )
 
-    assert sql.startswith("SELECT anon_1.rubro FROM (SELECT DISTINCT leaf_rows.rubro AS rubro")
-    assert "ORDER BY anon_1.rubro IS NOT NULL, lower(anon_1.rubro), anon_1.rubro" in sql
+    assert rubro_sql.startswith("SELECT anon_1.rubro FROM (SELECT DISTINCT rubro_rows.rubro AS rubro")
+    assert "ORDER BY anon_1.rubro IS NOT NULL, lower(anon_1.rubro), anon_1.rubro" in rubro_sql
+    assert category_sql.startswith("SELECT anon_1.category FROM (SELECT DISTINCT category_rows.category AS category")
+    assert "category_rows.rubro IS NOT DISTINCT FROM 'rubro'" in category_sql
+    assert "ORDER BY anon_1.category IS NOT NULL, lower(anon_1.category), anon_1.category" in category_sql
 
 
 def test_rubro_reconciliation_chart_selects_and_isolates_complete_category_metrics(database: sessionmaker[Session]) -> None:
@@ -758,8 +888,11 @@ def test_rubro_reconciliation_chart_reports_missing_sources_and_complete_high_ca
     missing_system, missing_audit, high_cardinality = asyncio.run(exercise())
     assert missing_system.status_code == missing_audit.status_code == high_cardinality.status_code == 200
     assert missing_system.json()["rubro_options"] == []
+    assert missing_system.json()["category_options"] == []
     assert missing_system.json()["category_chart"]["reason"] == "missing_system_evidence"
+    assert missing_system.json()["product_chart"]["reason"] == "missing_system_evidence"
     assert missing_audit.json()["category_chart"]["reason"] == "missing_audit_evidence"
+    assert missing_audit.json()["selected_category"] == {"value": "System category", "label": "System category"}
     assert missing_audit.json()["category_chart"]["items"] == [
         {
             "category": "System category",
@@ -776,3 +909,205 @@ def test_rubro_reconciliation_chart_reports_missing_sources_and_complete_high_ca
     assert chart["items"][0]["category"] == "Category-000"
     assert chart["items"][-1]["category"] == "Laptop"
     assert "page" not in high_cardinality.json()
+    assert missing_audit.json()["product_chart"] == {
+        "available": False,
+        "reason": "missing_audit_evidence",
+        "series": [
+            {"key": "found_in_cost_center_count", "label": "found_in_cost_center"},
+            {"key": "returned_count", "label": "returned"},
+            {"key": "difference_count", "label": "difference"},
+        ],
+        "items": [
+            {
+                "product": "Product",
+                "product_label": "Product",
+                "found_in_cost_center_count": None,
+                "returned_count": None,
+                "difference_count": None,
+            }
+        ],
+        "source_freshness": missing_audit.json()["product_chart"]["source_freshness"],
+        "page": {"limit": 50, "offset": 0, "has_more": False, "total_count": 1},
+    }
+
+
+def test_rubro_chart_category_selection_and_product_pagination_are_server_owned(database: sessionmaker[Session]) -> None:
+    populate(database)
+    with database() as db:
+        center = db.scalar(select(CostCenter).where(CostCenter.code == "190"))
+        system = db.scalar(
+            select(ImportBatch)
+            .where(ImportBatch.cost_center_id == center.id, ImportBatch.source == ImportSource.SYSTEM)
+            .order_by(ImportBatch.report_date.desc(), ImportBatch.id.desc())
+        )
+        audit = db.scalar(
+            select(ImportBatch)
+            .where(ImportBatch.cost_center_id == center.id, ImportBatch.source == ImportSource.AUDIT)
+            .order_by(ImportBatch.report_date.desc(), ImportBatch.id.desc())
+        )
+
+        def add_asset(code: str, category: str | None, product: str, state: AuditCurrentState, duplicate: bool = False) -> None:
+            asset = Asset(original_code=code, normalized_code=code)
+            db.add(asset)
+            db.flush()
+            observation = AssetObservation(
+                import_batch_id=system.id,
+                source=ImportSource.SYSTEM,
+                event=ObservationEvent.SNAPSHOT,
+                observed_on=system.report_date,
+                asset_id=asset.id,
+                cost_center_id=center.id,
+                original_data=_system_data("IT", category, product),
+                quantity=Decimal("1"),
+            )
+            db.add(observation)
+            if duplicate:
+                db.add(
+                    AssetObservation(
+                        import_batch_id=system.id,
+                        source=ImportSource.SYSTEM,
+                        event=ObservationEvent.SNAPSHOT,
+                        observed_on=system.report_date,
+                        asset_id=asset.id,
+                        cost_center_id=center.id,
+                        original_data=_system_data("IT", category, product),
+                        quantity=Decimal("1"),
+                    )
+                )
+            audit_observation = AssetObservation(
+                import_batch_id=audit.id,
+                source=ImportSource.AUDIT,
+                event=ObservationEvent.SNAPSHOT,
+                observed_on=audit.report_date,
+                cost_center_id=center.id,
+                original_data={"cells": []},
+                quantity=Decimal("1"),
+            )
+            db.add(audit_observation)
+            db.flush()
+            db.add_all(
+                (
+                    ReconciliationCase(
+                        audit_observation_id=audit_observation.id,
+                        cost_center_id=center.id,
+                        candidate_asset_id=asset.id,
+                        match_strategy=AuditMatchStrategy.EXACT_ORIGINAL_CODE,
+                    ),
+                    AuditCurrentStateProjection(
+                        asset_id=asset.id,
+                        cost_center_id=center.id,
+                        audit_observation_id=audit_observation.id,
+                        state=state,
+                        marker_category=(
+                            AuditReturnMarkerCategory.RECOGNIZED_RETURN
+                            if state == AuditCurrentState.RETURNED
+                            else AuditReturnMarkerCategory.UNMARKED_UNKNOWN
+                        ),
+                        marker_column=12,
+                        reason="test",
+                        projection_version="audit_l_return_v1",
+                    ),
+                )
+            )
+
+        add_asset("NULL-CATEGORY", None, "Unassigned", AuditCurrentState.RETURNED)
+        add_asset("SAFE-PRODUCT", "Named & Δ", "Product / & Δ", AuditCurrentState.FOUND, duplicate=True)
+        add_asset("SECOND-PRODUCT", "Named & Δ", "Second", AuditCurrentState.RETURNED)
+        db.commit()
+
+    async def request(**params: str | int) -> httpx.Response:
+        api = await client()
+        try:
+            assert (await api.post("/api/auth/login", json={"username": "viewer", "password": "password"})).status_code == 200
+            return await api.get("/api/dashboard/rubro-reconciliation-chart", params={"cost_center_code": "190", "rubro": "IT", **params})
+        finally:
+            await api.aclose()
+
+    omitted, explicit_null, named, invalid, invalid_limit, invalid_offset = (
+        asyncio.run(request()),
+        asyncio.run(request(category="")),
+        asyncio.run(request(category="Named & Δ")),
+        asyncio.run(request(category="missing & / Δ")),
+        asyncio.run(request(product_limit=101)),
+        asyncio.run(request(product_offset=10_001)),
+    )
+    assert all(response.status_code == 200 for response in (omitted, explicit_null, named, invalid))
+    null_option = {"value": None, "label": "Sin categoría asignada"}
+    assert omitted.json()["category_options"] == [null_option, {"value": "Laptop", "label": "Laptop"}, {"value": "Named & Δ", "label": "Named & Δ"}]
+    assert omitted.json()["selected_category"] == explicit_null.json()["selected_category"] == null_option
+    assert omitted.json()["product_chart"]["items"] == [
+        {
+            "product": "Unassigned",
+            "product_label": "Unassigned",
+            "found_in_cost_center_count": 0,
+            "returned_count": 1,
+            "difference_count": 0,
+        }
+    ]
+    assert named.json()["selected_category"] == {"value": "Named & Δ", "label": "Named & Δ"}
+    assert named.json()["product_chart"]["items"] == [
+        {
+            "product": "Product / & Δ",
+            "product_label": "Product / & Δ",
+            "found_in_cost_center_count": 1,
+            "returned_count": 0,
+            "difference_count": 0,
+        },
+        {
+            "product": "Second",
+            "product_label": "Second",
+            "found_in_cost_center_count": 0,
+            "returned_count": 1,
+            "difference_count": 0,
+        },
+    ]
+    assert invalid_limit.status_code == invalid_offset.status_code == 422
+    assert invalid.json()["selected_category"] == {"value": "missing & / Δ", "label": "missing & / Δ"}
+    assert invalid.json()["category_chart"]["available"] is True
+    assert invalid.json()["product_chart"]["reason"] == "invalid_category_selection"
+    assert invalid.json()["product_chart"]["items"] == []
+
+    with database() as db:
+        center = db.scalar(select(CostCenter).where(CostCenter.code == "190"))
+        system = db.scalar(
+            select(ImportBatch)
+            .where(ImportBatch.cost_center_id == center.id, ImportBatch.source == ImportSource.SYSTEM)
+            .order_by(ImportBatch.report_date.desc(), ImportBatch.id.desc())
+        )
+        db.add_all(
+            AssetObservation(
+                import_batch_id=system.id,
+                source=ImportSource.SYSTEM,
+                event=ObservationEvent.SNAPSHOT,
+                observed_on=system.report_date,
+                cost_center_id=center.id,
+                original_data=_system_data("IT", "High cardinality", f"Product-{number:03}"),
+                quantity=Decimal("1"),
+            )
+            for number in range(102)
+        )
+        db.commit()
+
+    statement_count = 0
+
+    def count_statements(*_args: object) -> None:
+        nonlocal statement_count
+        statement_count += 1
+
+    engine = database.kw["bind"]
+    event.listen(engine, "before_cursor_execute", count_statements)
+    try:
+        first_page = asyncio.run(request(category="High cardinality", product_limit=2, product_offset=0))
+        first_count = statement_count
+        statement_count = 0
+        last_page = asyncio.run(request(category="High cardinality", product_limit=1, product_offset=101))
+        last_count = statement_count
+    finally:
+        event.remove(engine, "before_cursor_execute", count_statements)
+
+    assert first_page.status_code == last_page.status_code == 200
+    assert first_page.json()["product_chart"]["page"] == {"limit": 2, "offset": 0, "has_more": True, "total_count": 102}
+    assert [item["product"] for item in first_page.json()["product_chart"]["items"]] == ["Product-000", "Product-001"]
+    assert last_page.json()["product_chart"]["page"] == {"limit": 1, "offset": 101, "has_more": False, "total_count": 102}
+    assert last_page.json()["product_chart"]["items"][0]["product"] == "Product-101"
+    assert first_count == last_count == 11

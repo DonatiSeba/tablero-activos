@@ -155,6 +155,16 @@ def _unresolved_audit_case_count(db: Session, batch: ImportBatch | None) -> int 
     )
 
 
+def _not_in_management_system_for_cost_center_count(
+    audit_only_matched_asset_count: int | None,
+    unresolved_audit_case_count: int | None,
+) -> int | None:
+    """Compose the review total only when both selected-source evidence sets exist."""
+    if audit_only_matched_asset_count is None or unresolved_audit_case_count is None:
+        return None
+    return audit_only_matched_asset_count + unresolved_audit_case_count
+
+
 def _summary_metrics_for_assets(
     db: Session,
     system_asset_ids: Any | None,
@@ -162,13 +172,15 @@ def _summary_metrics_for_assets(
 ) -> dict[str, int | None]:
     """Aggregate a database-side system scope without materializing asset IDs."""
     if system_asset_ids is None:
+        unresolved = _unresolved_audit_case_count(db, audit)
         return {
             "current_system_distinct_asset_count": None,
             "found_count": None,
             "returned_count": None,
             "review_required_count": None,
-            "unresolved_audit_case_count": _unresolved_audit_case_count(db, audit),
+            "unresolved_audit_case_count": unresolved,
             "audit_only_matched_asset_count": None,
+            "not_in_management_system_for_cost_center_count": _not_in_management_system_for_cost_center_count(None, unresolved),
             "pending_not_accounted_count": None,
         }
 
@@ -181,6 +193,7 @@ def _summary_metrics_for_assets(
             "review_required_count": None,
             "unresolved_audit_case_count": None,
             "audit_only_matched_asset_count": None,
+            "not_in_management_system_for_cost_center_count": None,
             "pending_not_accounted_count": None,
         }
 
@@ -219,13 +232,15 @@ def _summary_metrics_for_assets(
             ReconciliationCase.candidate_asset_id.not_in(system_ids),
         ),
     )
+    unresolved = _unresolved_audit_case_count(db, audit)
     return {
         "current_system_distinct_asset_count": system_count,
         "found_count": found,
         "returned_count": returned,
         "review_required_count": review_required,
-        "unresolved_audit_case_count": _unresolved_audit_case_count(db, audit),
+        "unresolved_audit_case_count": unresolved,
         "audit_only_matched_asset_count": audit_only,
+        "not_in_management_system_for_cost_center_count": _not_in_management_system_for_cost_center_count(audit_only, unresolved),
         "pending_not_accounted_count": system_count - found - returned,
     }
 
@@ -260,6 +275,7 @@ def _operational_issues(metrics: dict[str, int | None]) -> dict[str, int | None]
         "system_data_quality_omission_count": metrics["audit_only_matched_asset_count"],
         "review_required_count": metrics["review_required_count"],
         "unresolved_audit_case_count": metrics["unresolved_audit_case_count"],
+        "not_in_management_system_for_cost_center_count": metrics["not_in_management_system_for_cost_center_count"],
     }
 
 
@@ -494,6 +510,21 @@ def _ordered_distinct_rubros(leaf_rows: Any) -> Any:
     )
 
 
+def _ordered_distinct_categories(leaf_rows: Any, rubro: str | None) -> Any:
+    """Select distinct selected-rubro categories before display ordering."""
+    categories = (
+        select(leaf_rows.c.category.label("category"))
+        .where(leaf_rows.c.rubro.is_not_distinct_from(rubro))
+        .distinct()
+        .subquery()
+    )
+    return select(categories.c.category).order_by(
+        categories.c.category.is_not(None),
+        func.lower(categories.c.category),
+        categories.c.category,
+    )
+
+
 def _rubro_category_chart_items(
     db: Session,
     leaf_rows: Any,
@@ -592,14 +623,124 @@ def _rubro_category_chart_items(
     ]
 
 
+def _category_product_chart_items(
+    db: Session,
+    leaf_rows: Any,
+    rubro: str | None,
+    category: str | None,
+    audit: ImportBatch | None,
+    limit: int,
+    offset: int,
+) -> tuple[list[dict[str, object]], dict[str, int | bool]]:
+    """Aggregate the complete selected hierarchy in SQL, then paginate product groups."""
+    selected_rows = (
+        select(leaf_rows.c.product, leaf_rows.c.asset_id)
+        .where(
+            leaf_rows.c.rubro.is_not_distinct_from(rubro),
+            leaf_rows.c.category.is_not_distinct_from(category),
+        )
+        .subquery()
+    )
+    products = select(selected_rows.c.product.label("product")).distinct().subquery()
+    product_assets = (
+        select(selected_rows.c.product, selected_rows.c.asset_id)
+        .where(selected_rows.c.asset_id.is_not(None))
+        .distinct()
+        .subquery()
+    )
+    product_join = products.outerjoin(
+        product_assets,
+        products.c.product.is_not_distinct_from(product_assets.c.product),
+    )
+    page = {
+        "limit": limit,
+        "offset": offset,
+        "has_more": False,
+        "total_count": _count(db, select(func.count()).select_from(products)),
+    }
+    if audit is None:
+        rows = db.execute(
+            select(products.c.product)
+            .select_from(product_join)
+            .group_by(products.c.product)
+            .order_by(products.c.product.is_not(None), func.lower(products.c.product), products.c.product)
+            .offset(offset)
+            .limit(limit)
+        ).mappings()
+        items = [
+            {
+                "product": row["product"],
+                "product_label": "Sin producto asignado" if row["product"] is None else row["product"],
+                "found_in_cost_center_count": None,
+                "returned_count": None,
+                "difference_count": None,
+            }
+            for row in rows
+        ]
+    else:
+        audit_states = (
+            select(
+                AuditCurrentStateProjection.asset_id.label("asset_id"),
+                AuditCurrentStateProjection.state.label("state"),
+            )
+            .join(AssetObservation, AssetObservation.id == AuditCurrentStateProjection.audit_observation_id)
+            .where(AssetObservation.import_batch_id == audit.id)
+            .subquery()
+        )
+        rows = db.execute(
+            select(
+                products.c.product,
+                func.count(func.distinct(product_assets.c.asset_id)).label("system_count"),
+                func.count(
+                    func.distinct(
+                        case(
+                            (audit_states.c.state == AuditCurrentState.FOUND, product_assets.c.asset_id),
+                            else_=None,
+                        )
+                    )
+                ).label("found_count"),
+                func.count(
+                    func.distinct(
+                        case(
+                            (audit_states.c.state == AuditCurrentState.RETURNED, product_assets.c.asset_id),
+                            else_=None,
+                        )
+                    )
+                ).label("returned_count"),
+            )
+            .select_from(product_join.outerjoin(audit_states, audit_states.c.asset_id == product_assets.c.asset_id))
+            .group_by(products.c.product)
+            .order_by(products.c.product.is_not(None), func.lower(products.c.product), products.c.product)
+            .offset(offset)
+            .limit(limit)
+        ).mappings()
+        items = [
+            {
+                "product": row["product"],
+                "product_label": "Sin producto asignado" if row["product"] is None else row["product"],
+                "found_in_cost_center_count": int(row["found_count"]),
+                "returned_count": int(row["returned_count"]),
+                "difference_count": int(row["system_count"]) - int(row["found_count"]) - int(row["returned_count"]),
+            }
+            for row in rows
+        ]
+    page["has_more"] = offset + len(items) < page["total_count"]
+    return items, page
+
+
 @router.get("/api/dashboard/rubro-reconciliation-chart")
 def rubro_reconciliation_chart(
     cost_center_code: Annotated[str, Query(min_length=1)],
     rubro: Annotated[str | None, Query()] = None,
+    category: Annotated[str | None, Query()] = None,
+    product_limit: Annotated[int, Query()] = 50,
+    product_offset: Annotated[int, Query()] = 0,
     db: Session = Depends(get_db),
     _user: User = Depends(require_viewer),
 ) -> dict[str, object]:
-    """Return one complete selected-rubro category reconciliation chart."""
+    """Return a complete category chart and one bounded selected-category product chart."""
+    product_limit, product_offset = _page(product_limit, product_offset)
+    product_page = {"limit": product_limit, "offset": product_offset, "has_more": False, "total_count": 0}
     code = cost_center_code.strip()
     center = db.scalar(select(CostCenter).where(CostCenter.code == code))
     series = [
@@ -607,6 +748,17 @@ def rubro_reconciliation_chart(
         {"key": "returned_count", "label": "returned"},
         {"key": "difference_count", "label": "difference"},
     ]
+
+    def product_chart(reason: str) -> dict[str, object]:
+        return {
+            "available": False,
+            "reason": reason,
+            "series": series,
+            "items": [],
+            "source_freshness": source_freshness,
+            "page": product_page,
+        }
+
     if center is None:
         source_freshness = _source_freshness(None, None)
         return {
@@ -615,6 +767,8 @@ def rubro_reconciliation_chart(
             "audit_source": _source_contract(None, ImportSource.AUDIT),
             "rubro_options": [],
             "selected_rubro": None,
+            "category_options": [],
+            "selected_category": None,
             "category_chart": {
                 "available": False,
                 "reason": "cost_center_not_found",
@@ -622,6 +776,7 @@ def rubro_reconciliation_chart(
                 "items": [],
                 "source_freshness": source_freshness,
             },
+            "product_chart": product_chart("cost_center_not_found"),
         }
 
     batches = _latest_batches(db, [center.id])
@@ -634,6 +789,8 @@ def rubro_reconciliation_chart(
         "audit_source": _source_contract(audit, ImportSource.AUDIT),
         "rubro_options": [],
         "selected_rubro": None,
+        "category_options": [],
+        "selected_category": None,
         "category_chart": {
             "available": False,
             "reason": "missing_system_evidence",
@@ -641,6 +798,7 @@ def rubro_reconciliation_chart(
             "items": [],
             "source_freshness": source_freshness,
         },
+        "product_chart": product_chart("missing_system_evidence"),
     }
     if system is None:
         return response
@@ -651,16 +809,23 @@ def rubro_reconciliation_chart(
     response["rubro_options"] = options
     if not options:
         response["category_chart"]["reason"] = "empty_rubro"
+        response["product_chart"] = product_chart("empty_rubro")
         return response
 
-    selected_value = options[0]["value"] if rubro is None else (None if rubro == "" else rubro)
-    selected_option = _label_option(selected_value, "Sin rubro asignado")
-    response["selected_rubro"] = selected_option
-    if selected_value not in rubro_values:
+    selected_rubro = options[0]["value"] if rubro is None else (None if rubro == "" else rubro)
+    response["selected_rubro"] = _label_option(selected_rubro, "Sin rubro asignado")
+    if selected_rubro not in rubro_values:
         response["category_chart"]["reason"] = "invalid_rubro_selection"
+        response["product_chart"] = product_chart("invalid_rubro_selection")
         return response
 
-    items = _rubro_category_chart_items(db, leaf_rows, selected_value, audit)
+    category_values = list(db.scalars(_ordered_distinct_categories(leaf_rows, selected_rubro)))
+    category_options = [_label_option(value, "Sin categoría asignada") for value in category_values]
+    response["category_options"] = category_options
+    selected_category = category_options[0]["value"] if category is None and category_options else (None if category == "" else category)
+    response["selected_category"] = _label_option(selected_category, "Sin categoría asignada")
+
+    items = _rubro_category_chart_items(db, leaf_rows, selected_rubro, audit)
     response["category_chart"]["items"] = items
     if not items:
         response["category_chart"]["reason"] = "empty_rubro"
@@ -669,6 +834,28 @@ def rubro_reconciliation_chart(
     else:
         response["category_chart"]["available"] = True
         response["category_chart"]["reason"] = None
+
+    if selected_category not in category_values:
+        response["product_chart"] = product_chart("invalid_category_selection")
+        return response
+
+    product_items, product_page = _category_product_chart_items(
+        db,
+        leaf_rows,
+        selected_rubro,
+        selected_category,
+        audit,
+        product_limit,
+        product_offset,
+    )
+    response["product_chart"] = {
+        "available": audit is not None,
+        "reason": None if audit is not None else "missing_audit_evidence",
+        "series": series,
+        "items": product_items,
+        "source_freshness": source_freshness,
+        "page": product_page,
+    }
     return response
 
 

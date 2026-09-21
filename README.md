@@ -171,9 +171,14 @@ source-row JSON, raw notes, session data, or audit-log data.
   `review_required_count` are distinct assets in that system scope with an audit
   current-state projection whose provenance is the selected audit batch.
   `unresolved_audit_case_count` is the unresolved reconciliation-case count in
-  that selected audit batch. `pending_not_accounted_count` is current-system
-  assets not found or returned; review-required assets remain pending/not
-  accounted. Metrics needing unavailable system or audit evidence are `null`.
+  that selected audit batch. `not_in_management_system_for_cost_center_count`
+  combines each distinct matched audit asset absent from the selected system
+  snapshot with each unmatched reconciliation case from the selected audit
+  batch. It uses only the selected system snapshot as its membership reference
+  and remains `null` unless both source snapshots are available.
+  `pending_not_accounted_count` is current-system assets not found or returned;
+  review-required assets remain pending/not accounted. Metrics needing
+  unavailable system or audit evidence are `null`.
 - `GET /api/dashboard/system-drilldown?cost_center_code=190&limit=100&offset=0`
   returns the selected system snapshot grouped as `Rubro → Categoría → Producto`,
   with server-owned observation, distinct-asset, and reported-status counts.
@@ -183,20 +188,28 @@ source-row JSON, raw notes, session data, or audit-log data.
   10,000. `page` gives `has_more` and the total leaf-group count. It returns a
   stable, safe empty `groups` list and zero-count page when no system evidence
   exists.
-- `GET /api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=`
-  returns complete, unpaginated category bars for one rubro from the selected
-  system snapshot. `cost_center_code` is required. Omitting `rubro` selects the
-  first complete option in deterministic null-first, case-insensitive order;
-  explicit `rubro=` selects the null/unassigned rubro, and any other value matches
-  exactly after URL decoding. `rubro_options` and `selected_rubro` preserve null
-  values while providing `Sin rubro asignado` labels; category items likewise
-  preserve null with `Sin categoría asignada`. The server owns the
-  `found_in_cost_center_count`, `returned_count`, and `difference_count` series
-  and applies the selected rubro before grouping. There is no category pagination
-  or truncation. `category_chart.available` and its localizable `reason` express
-  `cost_center_not_found`, `missing_system_evidence`, `missing_audit_evidence`,
-  `invalid_rubro_selection`, or `empty_rubro`; unavailable audit metrics are
-  `null`. Source/audit batch metadata and freshness remain server-calculated.
+- `GET /api/dashboard/rubro-reconciliation-chart?cost_center_code=190&rubro=&category=&product_limit=50&product_offset=0`
+  returns complete, unpaginated category bars for one rubro and a bounded product
+  chart for one selected category from the selected system snapshot.
+  `cost_center_code` is required. Omitting `rubro` or `category` selects the
+  first option in deterministic null-first, case-insensitive, raw-value
+  tie-break order; explicit `rubro=` or `category=` selects the corresponding
+  null/unassigned value, and any other value matches exactly after URL decoding.
+  `rubro_options`/`selected_rubro` and `category_options`/`selected_category`
+  preserve null values while providing `Sin rubro asignado` and
+  `Sin categoría asignada` labels. `product_chart` uses the same three
+  reconciliation series and preserves null products with `Sin producto asignado`.
+  It filters by rubro and category before grouping distinct system assets, then
+  paginates product groups with a server-owned `page` (`product_limit` defaults
+  to 50, is 1–100, and `product_offset` is bounded at 10,000). Product metrics
+  remain null when audit evidence is unavailable. Unmatched audit evidence is
+  not assigned to this hierarchy because it has no trustworthy rubro/category/
+  product source label. Both charts expose localizable source/rubro reasons such
+  as `cost_center_not_found`, `missing_system_evidence`,
+  `missing_audit_evidence`, `invalid_rubro_selection`, or `empty_rubro`.
+  `invalid_category_selection` applies only to `product_chart`; the already-valid
+  complete category chart remains available. Source/audit batch metadata and
+  freshness remain server-calculated.
 - `GET /api/operations/import-history?source=&cost_center_code=&status=&limit=50&offset=0`
   returns safe batch metadata and sanitized warning/processing counts. Ordering
   is `imported_at` descending then batch UUID descending. `limit` is 1–100 and
