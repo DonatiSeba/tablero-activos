@@ -1,6 +1,6 @@
 import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import * as echarts from "echarts";
-import type { EChartsOption } from "echarts";
+import type { BarSeriesOption, EChartsOption } from "echarts";
 
 export type Role = "viewer" | "editor" | "admin";
 export type CurrentUser = { id: string; username: string; display_name: string; role: Role; must_change_password: boolean };
@@ -203,6 +203,13 @@ function StackedBars({ chart }: { chart: DrilldownResponse["charts"]["primary_st
     series: chart.series.map((series) => ({ name: chartLabel(series.label), type: "bar", stack: "conciliación", emphasis: { focus: "series" }, data: chart.items.map((item) => item[series.key]) })),
   }} />;
 }
+type ProductBarDataItem = {
+  value: number | null;
+  emphasis: { focus: readonly number[] };
+};
+function productBarDataItem(value: number | null, productIndex: number): ProductBarDataItem {
+  return { value, emphasis: { focus: [productIndex] } };
+}
 function ProductBars({ chart }: { chart: ReconciliationChart }) {
   if (!chart.available) return <Empty>{rubroChartReason(chart.reason)}</Empty>;
   if (chart.items.length === 0) return <Empty>No hay productos para la categoría seleccionada.</Empty>;
@@ -215,7 +222,12 @@ function ProductBars({ chart }: { chart: ReconciliationChart }) {
     grid: { left: 16, right: 24, top: 24, bottom: 52, containLabel: true },
     xAxis: { type: "value", minInterval: 1 },
     yAxis: { type: "category", data: chart.items.map((item) => item.product_label) },
-    series: chart.series.map((series) => ({ name: chartLabel(series.label), type: "bar", emphasis: { focus: "series" }, data: chart.items.map((item) => item[series.key]) })),
+    series: chart.series.map((series) => ({
+      name: chartLabel(series.label),
+      type: "bar",
+      // ECharts supports per-item data-index focus, but its bar helper narrows focus to series values.
+      data: chart.items.map((item, productIndex) => productBarDataItem(item[series.key], productIndex)) as unknown as BarSeriesOption["data"],
+    })),
   }} /></div>;
 }
 function Evolution({ chart }: { chart: TimeEvolution }) {

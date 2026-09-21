@@ -58,6 +58,13 @@ Make the dashboard suppress unavailable temporal comparisons, surface every audi
   - Outcome: backend/frontend contracts, nulls, encoding, stale responses, permissions, complete server-side aggregation, and preserved dashboard behavior pass review.
   - Evidence: independent verification passed after correcting one README precision issue. Full checks passed: 95 backend tests, 24 frontend tests, production build, and whitespace checks. No actionable RDR defect remains. Live PostgreSQL and real-browser execution remain environmental gaps; Vite retains the 1,221.12 kB chunk warning. Unrelated user-owned `frontend/index.html` and `frontend/public/favicon.svg` changes were preserved and excluded from RDR review scope.
 
+- [x] RDR-06 Focus product-chart hover by item.
+  - Outcome: hovering one product keeps its Encontrados, Retornados, and Diferencia bars emphasized together instead of emphasizing one metric series across every product.
+  - Allowed edit candidates: `frontend/src/app.tsx`, `frontend/src/app.test.tsx`.
+  - Checks: focused/full frontend tests, production build, whitespace check.
+  - Evidence: writer and independent verification passed with 25 frontend tests, production build, and whitespace checks. `ProductBars` emits item-level `emphasis.focus: [productIndex]` across all three metric series, retains the axis tooltip, and removes series-wide focus only from the product chart. Type safety uses a narrow local datum plus an isolated `unknown` boundary; no broad `any` or client arithmetic was introduced. Real-browser hover remains unverified.
+  - Commit: frontend work unit `fix: focus reconciliation hover by product`.
+
 ## Progress
 - 2026-09-21: User requested three refinements: hide unavailable temporal evolution, count audited items absent from the selected CC system list, and add category/product filtering.
 - 2026-09-21: Read-only mapping confirmed temporal availability is already server-owned; cross-CC matches currently collapse into a generic quality metric; the real hierarchy is Rubro → Categoría → Producto.
@@ -69,6 +76,8 @@ Make the dashboard suppress unavailable temporal comparisons, surface every audi
 - 2026-09-21: RDR-04 implemented and writer-verified. The UI now supports Rubro → Categoría → Producto with server pagination and no client reconciliation arithmetic.
 - 2026-09-21: RDR-05 independent verification passed after one documentation correction. No actionable implementation defect remains.
 - 2026-09-21: User authorized two local work units: backend contract/tests/docs in `f5c07c1`, followed by the frontend experience/tests/styles and this tracker in `feat: improve reconciliation dashboard detail`. Unrelated favicon/index changes remain outside both commits.
+- 2026-09-21: User accepted the production rollout, then requested product-oriented hover: one product row should retain all three metric bars together.
+- 2026-09-21: RDR-06 implemented and independently verified. Product hover now focuses the same data index across all three metric series; no actionable finding remains.
 
 ## Next step
-Await explicit push authorization. Keep unrelated user-owned favicon/index changes outside RDR delivery unless the user requests otherwise.
+Await explicit commit authorization, then push/deploy separately if requested. Keep unrelated user-owned favicon/index changes outside this work unit.

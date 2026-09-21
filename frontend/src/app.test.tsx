@@ -70,6 +70,10 @@ const reviewQueue = { items: [{ id: "case-1", category: "unresolved_identifier",
 const currentStates = { states: [{ asset_id: "asset-1", asset_code: "ACT-01", cost_center: { code: "190", name: "Principal" }, state: "returned", reason: "authorized_post_audit_column_l_return_marker", marker: { column: 12, category: "recognized_return", raw_value: "DEVOLVIO" }, source_report_date: "2026-09-17", projection_version: "audit_l_return_v1" }] };
 
 type FetchResponses = { summaries?: unknown; drilldown?: unknown; rubroChart?: unknown; importHistory?: unknown; reviewQueue?: unknown; currentStates?: unknown; users?: unknown };
+type ProductChartOption = {
+  yAxis?: { data?: string[] };
+  series?: { emphasis?: { focus?: unknown }; data: { value: number | null; emphasis: { focus: readonly number[] } }[] }[];
+};
 function json(data: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } })); }
 function installViewport(matchesMobile: boolean) {
   vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
@@ -328,9 +332,27 @@ describe("sesión y vistas de presentación", () => {
     expect(screen.getByRole("option", { name: "Sin categoría asignada" })).toBeInTheDocument();
     await waitFor(() => expect(setOptionMock).toHaveBeenCalledWith(expect.objectContaining({
       yAxis: expect.objectContaining({ data: ["Sin producto asignado", "Mesa"] }),
-      series: [expect.objectContaining({ data: [7, 4] }), expect.objectContaining({ data: [3, 1] }), expect.objectContaining({ data: [2, 5] })],
+      series: [
+        expect.objectContaining({ data: [expect.objectContaining({ value: 7 }), expect.objectContaining({ value: 4 })] }),
+        expect.objectContaining({ data: [expect.objectContaining({ value: 3 }), expect.objectContaining({ value: 1 })] }),
+        expect.objectContaining({ data: [expect.objectContaining({ value: 2 }), expect.objectContaining({ value: 5 })] }),
+      ],
     })));
     expect(screen.queryByRole("table", { name: /detalle/i })).not.toBeInTheDocument();
+  });
+
+  it("enfatiza juntos los tres valores del producto señalado", async () => {
+    installFetch(); render(<App />);
+    await screen.findByRole("img", { name: "Barras agrupadas de conciliación por producto" });
+    const productOption = setOptionMock.mock.calls
+      .map(([option]) => option as ProductChartOption)
+      .find((option) => option.yAxis?.data?.join("|") === "Sin producto asignado|Mesa");
+    expect(productOption?.series).toHaveLength(3);
+    const productSeries = productOption!.series!;
+    expect(productSeries.map((series) => series.emphasis?.focus)).toEqual([undefined, undefined, undefined]);
+    for (const productIndex of rubroChart.product_chart.items.keys()) {
+      expect(productSeries.map((series) => series.data[productIndex].emphasis.focus)).toEqual([[productIndex], [productIndex], [productIndex]]);
+    }
   });
 
   it("mantiene los productos de alta cardinalidad dentro de un área desplazable", async () => {
