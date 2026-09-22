@@ -200,14 +200,31 @@ function Donut({ chart }: { chart: DonutChart }) {
 function StackedBars({ chart }: { chart: DrilldownResponse["charts"]["primary_stacked_bar"] }) {
   if (!chart.available) return <Empty>{chartReason(chart.reason)}</Empty>;
   const colors: Record<string, string> = { found_in_cost_center_count: "#17855f", returned_count: "#168aad", difference_count: "#c74545" };
-  return <EChart ariaLabel="Barras apiladas de conciliación por categoría" option={{
+  const rubroMap = new Map<string | null, { rubro: string | null; found_in_cost_center_count: number; returned_count: number; difference_count: number }>();
+  for (const item of chart.items) {
+    const existing = rubroMap.get(item.rubro);
+    if (existing) {
+      existing.found_in_cost_center_count += item.found_in_cost_center_count ?? 0;
+      existing.returned_count += item.returned_count ?? 0;
+      existing.difference_count += item.difference_count ?? 0;
+    } else {
+      rubroMap.set(item.rubro, {
+        rubro: item.rubro,
+        found_in_cost_center_count: item.found_in_cost_center_count ?? 0,
+        returned_count: item.returned_count ?? 0,
+        difference_count: item.difference_count ?? 0,
+      });
+    }
+  }
+  const aggregatedItems = Array.from(rubroMap.values());
+  return <EChart ariaLabel="Barras apiladas de conciliación por rubro" option={{
     color: chart.series.map((series) => colors[series.key] || "#627587"),
     tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
     legend: { bottom: 0, data: chart.series.map((series) => chartLabel(series.label)) },
     grid: { left: 16, right: 16, top: 24, bottom: 52, containLabel: true },
     xAxis: { type: "value", minInterval: 1 },
-    yAxis: { type: "category", data: chart.items.map((item) => `${hierarchyLabel(item.rubro, "rubro")} · ${hierarchyLabel(item.category, "categoría")}`) },
-    series: chart.series.map((series) => ({ name: chartLabel(series.label), type: "bar", stack: "conciliación", emphasis: { focus: "series" }, data: chart.items.map((item) => item[series.key]) })),
+    yAxis: { type: "category", data: aggregatedItems.map((item) => hierarchyLabel(item.rubro, "rubro")) },
+    series: chart.series.map((series) => ({ name: chartLabel(series.label), type: "bar", stack: "conciliación", emphasis: { focus: "series" }, data: aggregatedItems.map((item) => item[series.key]) })),
   }} />;
 }
 type ProductBarDataItem = {
@@ -274,6 +291,7 @@ function OperationalIssues({ issues }: { issues: OperationalIssues }) {
 function ServerPagination({ page, busy, label, onNavigate }: { page: Page; busy: boolean; label: string; onNavigate: (offset: number, limit: number) => void }) {
   const pageNumber = Math.floor(page.offset / page.limit) + 1;
   const pageCount = Math.max(1, Math.ceil(page.total_count / page.limit));
+  if (pageCount <= 1) return null;
   return <nav className="pagination dashboard-pagination" aria-label={label}>
     <button type="button" className="button-secondary" disabled={busy || page.offset === 0} onClick={() => onNavigate(Math.max(0, page.offset - page.limit), page.limit)}>Anterior</button>
     <span aria-live="polite">Página {pageNumber} de {pageCount}</span>
