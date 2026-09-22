@@ -59,6 +59,39 @@ def _reject_import(
     raise HTTPException(status_code=status_code, detail=detail)
 
 
+def _resolve_active_cost_center(
+    db: Session,
+    request: Request,
+    user: User,
+    code: str,
+    *,
+    source: str,
+) -> CostCenter:
+    """Resolve an explicitly selected center without mutating center lifecycle state."""
+    cost_center = db.scalar(select(CostCenter).where(CostCenter.code == code))
+    if cost_center is None:
+        _reject_import(
+            db,
+            request,
+            user,
+            code="unknown_cost_center",
+            detail="cost_center_code does not exist",
+            status_code=422,
+            source=source,
+        )
+    if cost_center.status is not CostCenterStatus.ACTIVE:
+        _reject_import(
+            db,
+            request,
+            user,
+            code="inactive_cost_center",
+            detail="cost_center_code is inactive",
+            status_code=422,
+            source=source,
+        )
+    return cost_center
+
+
 def _asset_for_exact_code(db: Session, cache: dict[str, Asset], original_code: str, row: dict[str, object]) -> Asset:
     """Associate only on exact original source code; normalized values are never queried."""
     asset = cache.get(original_code)
@@ -82,6 +115,7 @@ def import_system_report(
     request: Request,
     file: Annotated[UploadFile | None, File()] = None,
     report_date: Annotated[str | None, Form()] = None,
+    cost_center_code: Annotated[str | None, Form()] = None,
     db: Session = Depends(get_db),
     user: User = Depends(require_editor),
 ) -> dict[str, object]:
@@ -92,6 +126,17 @@ def import_system_report(
         _reject_import(db, request, user, code="invalid_file_type", detail="file must have a .xlsx filename", status_code=400)
     try:
         parsed_date = parse_report_date(report_date)
+        if cost_center_code is None or not cost_center_code.strip():
+            raise ImportValidationError("missing_cost_center_code", "cost_center_code is required")
+        selected_cost_center_code = cost_center_code.strip()
+    except ImportValidationError as error:
+        _reject_import(db, request, user, code=error.code, detail=error.detail, status_code=422)
+
+    cost_center = _resolve_active_cost_center(
+        db, request, user, selected_cost_center_code, source="system"
+    )
+
+    try:
         content = read_upload_content(file.file)
         if not content:
             raise ImportValidationError("missing_file", "uploaded file is empty")
@@ -106,6 +151,16 @@ def import_system_report(
         _reject_import(db, request, user, code="duplicate_sha256", detail="this file content was already imported", status_code=409)
 
     try:
+        if report.cost_center_code != selected_cost_center_code:
+            _reject_import(
+                db,
+                request,
+                user,
+                code="cost_center_mismatch",
+                detail="workbook Nro. CC does not match cost_center_code",
+                status_code=422,
+            )
+
         observed_names = report.observed_cost_center_names
         if not observed_names:
             _reject_import(
@@ -116,30 +171,16 @@ def import_system_report(
                 detail="at least one Centro de Costo value is required",
                 status_code=422,
             )
-        cost_center = db.scalar(select(CostCenter).where(CostCenter.code == report.cost_center_code))
         warnings: list[dict[str, object]] = []
-        if cost_center is None:
-            cost_center = CostCenter(
-                code=report.cost_center_code,
-                name=observed_names[0],
-                status=CostCenterStatus.ACTIVE,
+        differing_names = [name for name in observed_names if name != cost_center.name]
+        if differing_names:
+            warnings.append(
+                {
+                    "code": "divergent_cost_center_names",
+                    "observed_names": list(observed_names),
+                    "stored_name": cost_center.name,
+                }
             )
-            db.add(cost_center)
-            db.flush()
-            if len(observed_names) > 1:
-                warnings.append(
-                    {"code": "divergent_cost_center_names", "observed_names": list(observed_names), "stored_name": cost_center.name}
-                )
-        else:
-            differing_names = [name for name in observed_names if name != cost_center.name]
-            if differing_names:
-                warnings.append(
-                    {
-                        "code": "divergent_cost_center_names",
-                        "observed_names": list(observed_names),
-                        "stored_name": cost_center.name,
-                    }
-                )
 
         missing_asset_code_rows = sum(
             1 for row in report.rows if not original_asset_code(row.named_values["Cód. Ident."]).strip()
@@ -251,6 +292,15 @@ def import_audit_report(
         parsed_date = parse_report_date(report_date)
         if cost_center_code is None or not cost_center_code.strip():
             raise ImportValidationError("missing_cost_center_code", "cost_center_code is required")
+        selected_cost_center_code = cost_center_code.strip()
+    except ImportValidationError as error:
+        _reject_import(db, request, user, code=error.code, detail=error.detail, status_code=422, source="audit")
+
+    cost_center = _resolve_active_cost_center(
+        db, request, user, selected_cost_center_code, source="audit"
+    )
+
+    try:
         content = read_upload_content(file.file)
         if not content:
             raise ImportValidationError("missing_file", "uploaded file is empty")
@@ -265,9 +315,6 @@ def import_audit_report(
         _reject_import(db, request, user, code="duplicate_sha256", detail="this file content was already imported", status_code=409, source="audit")
 
     try:
-        cost_center = db.scalar(select(CostCenter).where(CostCenter.code == cost_center_code.strip()))
-        if cost_center is None:
-            _reject_import(db, request, user, code="unknown_cost_center", detail="cost_center_code does not exist", status_code=422, source="audit")
         storage_path, _ = store_original_file(content, digest)
         batch = ImportBatch(
             source=ImportSource.AUDIT,

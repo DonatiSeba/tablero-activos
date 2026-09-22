@@ -33,6 +33,8 @@ The persistence model already supports multiple cost centers and multiple report
 - Forecast: approximately 450–700 authored changed lines across backend routes, import validation, frontend UI, tests, and documentation.
 - Strategy: feature-branch-chain (selected by the user after the above-budget forecast).
 - Slices: MCC-01 backend center lifecycle, MCC-02 explicit import binding, then MCC-03 frontend management/upload workflow.
+- Slice boundary: MCC-01 is commit `9b626e2`; MCC-02 starts after it.
+- Running authored lines: 890 committed after MCC-01; MCC-02 currently adds 553 uncommitted authored lines (tests, docs, and tracking included; no generated files).
 - Branch: `feat/asset-reconciliation-mvp`.
 
 ## TDD and checks
@@ -44,19 +46,19 @@ The persistence model already supports multiple cost centers and multiple report
 
 ## Tasks
 
-- [ ] MCC-01 Add protected cost-center management contracts.
-  - Status: verified; work-unit commit authorized and pending.
+- [x] MCC-01 Add protected cost-center management contracts.
+  - Status: completed.
   - Allowed edit candidates: `backend/app/cost_centers.py`, `backend/app/main.py`, `backend/app/models.py` only if required, `backend/tests/test_cost_centers.py`, and directly related backend test helpers.
   - Outcome: administrators can create and update centers; authorized importers can list active centers; duplicate/blank codes, invalid date ranges, unauthorized mutations, and inactive-state behavior are validated server-side.
   - Checks: focused backend tests, full backend regression suite, and whitespace check.
-  - Commit: authorized; identity pending.
+  - Commit: `9b626e2` (`feat: add cost center management contracts`).
 
 - [ ] MCC-02 Bind both import sources to an explicit active cost center.
-  - Status: pending.
+  - Status: verified; work-unit commit authorized and pending.
   - Allowed edit candidates: `backend/app/imports.py`, `backend/app/system_imports.py` only if required, `backend/tests/test_system_imports.py`, `backend/tests/test_audit_imports.py`, and import API documentation under `docs/` or `README.md` when directly affected.
   - Outcome: system and audit uploads require an active selected center; system workbook codes must match it; imports remain immutable and historical; existing automation contracts are documented.
   - Checks: focused import tests, full backend regression suite, offline migration SQL if persistence changes, and whitespace check.
-  - Commit: pending explicit user authorization.
+  - Commit: authorized; identity pending.
 
 - [ ] MCC-03 Deliver the multi-center management and upload UI.
   - Status: pending.
@@ -82,12 +84,20 @@ The persistence model already supports multiple cost centers and multiple report
 - 2026-09-22: MCC-01 writer checks passed (8 focused, 103 full), but independent verification found semantic same-value PATCH requests were accepted as mutations and several denial paths lacked direct regression tests. MCC-01 remained in progress for a bounded correction.
 - 2026-09-22: MCC-01 correction now rejects and audits semantic no-op PATCH requests and adds direct denial-path coverage. Final independent verification passed with 17 focused tests and 112 full backend tests; the parent spot-check reran 17 focused tests successfully.
 - 2026-09-22: The user authorized the MCC-01 work-unit commit and selected the feature-branch-chain delivery strategy. Push and deployment remain unauthorized.
+- 2026-09-22: MCC-01 completed in commit `9b626e2` with 890 authored lines. MCC-02 started as the next isolated work unit.
+- 2026-09-22: MCC-02 writer reached 26 focused and 113 full passing tests, but independent verification failed on validation precedence and insufficient multi-center relationship assertions. A pre-existing post-storage/database-failure orphan-file risk was also identified; it is outside this task's explicit-center scope and must be documented truthfully rather than silently expanded into storage transaction redesign.
+- 2026-09-22: MCC-02 correction validates the selected center before workbook processing, proves every multi-center persistence relationship, and fixes external duplicate-response documentation. Final independent verification passed with 28 focused and 115 full backend tests; the parent spot-check reran 28 focused tests successfully. The coherent work unit is 553 authored lines.
+- 2026-09-22: The user authorized the MCC-02 work-unit commit and continuation into MCC-03. Push and deployment remain unauthorized.
 
 ## Verification evidence
 - MCC-01 initial writer: `python -m pytest backend/tests/test_cost_centers.py` passed (8 tests); `python -m pytest backend/tests` passed (103 tests); `git diff --check` passed with an LF-to-CRLF working-copy warning.
 - MCC-01 initial independent verification: FAIL because same-value PATCH requests created update audit records instead of being rejected; empty/null/missing-center update paths needed direct tests.
 - MCC-01 final independent verification: PASS; prior findings closed, 17 focused tests passed, 112 full backend tests passed, `git diff --check` passed with the existing line-ending warning, and `git diff --cached --exit-code` confirmed no staged changes.
 - MCC-01 parent spot-check: 17 focused tests passed; cached diff and whitespace checks passed.
+- MCC-02 initial writer: final rerun passed 26 focused import tests and 113 full backend tests; `git diff --check` passed, but the writer reported partial because an earlier assertion relied on nondeterministic audit-log ordering.
+- MCC-02 initial independent verification: FAIL because center lifecycle validation followed workbook parsing/digest checks and tests did not fully assert batch/observation/case center relationships. It also surfaced the pre-existing possibility of a digest file remaining after database persistence failure.
+- MCC-02 final independent verification: PASS; all prior implementation and documentation findings closed, 28 focused tests passed, 115 full backend tests passed, and the staged index was clean.
+- MCC-02 parent spot-check: 28 focused import tests passed; cached diff and whitespace checks passed.
 
 ## Next step
-Create the authorized MCC-01 work-unit commit, record its identity, then start MCC-02.
+Create the authorized MCC-02 work-unit commit, record its identity, then start MCC-03.

@@ -19,7 +19,16 @@ from backend.app import system_imports
 from backend.app.auth import password_hasher
 from backend.app.db import Base, get_db
 from backend.app.main import app
-from backend.app.models import Asset, AssetObservation, AuditLog, CostCenter, ImportBatch, User, UserRole
+from backend.app.models import (
+    Asset,
+    AssetObservation,
+    AuditLog,
+    CostCenter,
+    CostCenterStatus,
+    ImportBatch,
+    User,
+    UserRole,
+)
 from backend.app.system_imports import (
     ImportValidationError,
     StorageIntegrityError,
@@ -97,7 +106,12 @@ def add_user(factory: sessionmaker[Session], role: UserRole) -> User:
         password_hash=password_hasher.hash("correct horse battery staple"), role=role, is_active=True,
     )
     with factory() as db:
-        db.add(user)
+        db.add_all(
+            [
+                user,
+                CostCenter(code="190", name="Operations", status=CostCenterStatus.ACTIVE),
+            ]
+        )
         db.commit()
     return user
 
@@ -169,7 +183,11 @@ def test_editor_import_preserves_extra_evidence_and_raw_file(database: sessionma
         client, login = await authenticated_client(UserRole.EDITOR)
         assert login.status_code == 200
         try:
-            return await client.post("/api/imports/system", files={"file": ("cc190.xlsx", content)}, data={"report_date": "2026-09-17"})
+            return await client.post(
+                "/api/imports/system",
+                files={"file": ("cc190.xlsx", content)},
+                data={"report_date": "2026-09-17", "cost_center_code": "190"},
+            )
         finally:
             await client.aclose()
 
@@ -191,8 +209,9 @@ def test_duplicate_and_invalid_imports_are_rejected_and_audited(database: sessio
     async def exercise() -> tuple[httpx.Response, httpx.Response]:
         client, _ = await authenticated_client(UserRole.ADMIN)
         try:
-            first = await client.post("/api/imports/system", files={"file": ("cc190.xlsx", content)}, data={"report_date": "2026-09-17"})
-            duplicate = await client.post("/api/imports/system", files={"file": ("again.xlsx", content)}, data={"report_date": "2026-09-17"})
+            data = {"report_date": "2026-09-17", "cost_center_code": "190"}
+            first = await client.post("/api/imports/system", files={"file": ("cc190.xlsx", content)}, data=data)
+            duplicate = await client.post("/api/imports/system", files={"file": ("again.xlsx", content)}, data=data)
             return first, duplicate
         finally:
             await client.aclose()
@@ -203,6 +222,166 @@ def test_duplicate_and_invalid_imports_are_rejected_and_audited(database: sessio
     with database() as db:
         assert len(list(db.scalars(select(ImportBatch)))) == 1
         assert db.scalar(select(AuditLog).where(AuditLog.action == "imports.system_rejected")).details == {"reason": "duplicate_sha256"}
+
+
+def test_system_import_resolves_selected_center_before_reading_malformed_or_duplicate_content(
+    database: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add_user(database, UserRole.EDITOR)
+    with database() as db:
+        db.add(CostCenter(code="300", name="Legacy", status=CostCenterStatus.INACTIVE))
+        db.commit()
+    duplicate_content = workbook_bytes(report_rows())
+
+    async def exercise() -> list[httpx.Response]:
+        client, _ = await authenticated_client(UserRole.EDITOR)
+        try:
+            accepted = await client.post(
+                "/api/imports/system",
+                files={"file": ("accepted.xlsx", duplicate_content)},
+                data={"report_date": "2026-09-17", "cost_center_code": "190"},
+            )
+            assert accepted.status_code == 201
+
+            def fail_if_read(_: object) -> bytes:
+                raise AssertionError("invalid selected centers must be rejected before reading workbook bytes")
+
+            monkeypatch.setattr(imports_api, "read_upload_content", fail_if_read)
+            responses = []
+            for center_code in ("missing", "300"):
+                for filename, content in (
+                    ("malformed.xlsx", b"not an xlsx"),
+                    ("duplicate.xlsx", duplicate_content),
+                ):
+                    responses.append(
+                        await client.post(
+                            "/api/imports/system",
+                            files={"file": (filename, content)},
+                            data={"report_date": "2026-09-18", "cost_center_code": center_code},
+                        )
+                    )
+            return responses
+        finally:
+            await client.aclose()
+
+    responses = asyncio.run(exercise())
+    assert [(response.status_code, response.json()["detail"]) for response in responses] == [
+        (422, "cost_center_code does not exist"),
+        (422, "cost_center_code does not exist"),
+        (422, "cost_center_code is inactive"),
+        (422, "cost_center_code is inactive"),
+    ]
+    with database() as db:
+        reasons = list(
+            db.scalars(
+                select(AuditLog.details)
+                .where(AuditLog.action == "imports.system_rejected")
+                .order_by(AuditLog.created_at, AuditLog.id)
+            )
+        )
+        assert sorted(reason["reason"] for reason in reasons) == [
+            "inactive_cost_center",
+            "inactive_cost_center",
+            "unknown_cost_center",
+            "unknown_cost_center",
+        ]
+
+
+def test_system_import_requires_explicit_active_matching_center_without_persisting_rejected_evidence(
+    database: sessionmaker[Session], tmp_path: Path
+) -> None:
+    add_user(database, UserRole.EDITOR)
+    with database() as db:
+        db.add_all(
+            [
+                CostCenter(code="200", name="Finance", status=CostCenterStatus.ACTIVE),
+                CostCenter(code="300", name="Legacy", status=CostCenterStatus.INACTIVE),
+            ]
+        )
+        db.commit()
+    content = workbook_bytes(report_rows())
+
+    async def exercise() -> tuple[list[httpx.Response], httpx.Response, httpx.Response]:
+        client, _ = await authenticated_client(UserRole.EDITOR)
+        try:
+            rejected = []
+            for data in (
+                {"report_date": "2026-09-17"},
+                {"report_date": "2026-09-17", "cost_center_code": "   "},
+                {"report_date": "2026-09-17", "cost_center_code": "missing"},
+                {"report_date": "2026-09-17", "cost_center_code": "300"},
+                {"report_date": "2026-09-17", "cost_center_code": "200"},
+            ):
+                rejected.append(
+                    await client.post(
+                        "/api/imports/system",
+                        files={"file": ("cc190.xlsx", content)},
+                        data=data,
+                    )
+                )
+            accepted = await client.post(
+                "/api/imports/system",
+                files={"file": ("cc190.xlsx", content)},
+                data={"report_date": "2026-09-17", "cost_center_code": " 190 "},
+            )
+            rows_200 = [row[:5] + [200, "Finance"] + row[7:] for row in report_rows()]
+            accepted_second_center = await client.post(
+                "/api/imports/system",
+                files={"file": ("cc200.xlsx", workbook_bytes(rows_200))},
+                data={"report_date": "2026-09-18", "cost_center_code": "200"},
+            )
+            return rejected, accepted, accepted_second_center
+        finally:
+            await client.aclose()
+
+    rejected, accepted, accepted_second_center = asyncio.run(exercise())
+    assert [(response.status_code, response.json()["detail"]) for response in rejected] == [
+        (422, "cost_center_code is required"),
+        (422, "cost_center_code is required"),
+        (422, "cost_center_code does not exist"),
+        (422, "cost_center_code is inactive"),
+        (422, "workbook Nro. CC does not match cost_center_code"),
+    ]
+    assert accepted.status_code == 201
+    assert accepted.json()["cost_center"]["code"] == "190"
+    assert accepted_second_center.status_code == 201
+    assert accepted_second_center.json()["cost_center"]["code"] == "200"
+    with database() as db:
+        batches = list(db.scalars(select(ImportBatch)))
+        observations = list(db.scalars(select(AssetObservation)))
+        assets = list(db.scalars(select(Asset)))
+        centers = list(db.scalars(select(CostCenter).order_by(CostCenter.code)))
+        rejections = list(
+            db.scalars(
+                select(AuditLog)
+                .where(AuditLog.action == "imports.system_rejected")
+                .order_by(AuditLog.created_at, AuditLog.id)
+            )
+        )
+        center_ids = {center.code: center.id for center in centers}
+        expected_batch_centers = {
+            "cc190.xlsx": center_ids["190"],
+            "cc200.xlsx": center_ids["200"],
+        }
+        assert len(batches) == 2
+        assert all(batch.cost_center_id == expected_batch_centers[batch.original_filename] for batch in batches)
+        batch_center_ids = {batch.id: batch.cost_center_id for batch in batches}
+        assert len(observations) == 4 and len(assets) == 2
+        assert all(
+            observation.cost_center_id == batch_center_ids[observation.import_batch_id]
+            for observation in observations
+        )
+        assert [center.code for center in centers] == ["190", "200", "300"]
+        assert sorted(entry.details["reason"] for entry in rejections) == sorted(
+            [
+                "missing_cost_center_code",
+                "missing_cost_center_code",
+                "unknown_cost_center",
+                "inactive_cost_center",
+                "cost_center_mismatch",
+            ]
+        )
+        assert len(list((tmp_path / "imports").rglob("*.xlsx"))) == 2
 
 
 def test_lazy_workbook_failure_is_audited_validation_rejection(database: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -221,7 +400,11 @@ def test_lazy_workbook_failure_is_audited_validation_rejection(database: session
     async def exercise() -> httpx.Response:
         client, _ = await authenticated_client(UserRole.EDITOR)
         try:
-            return await client.post("/api/imports/system", files={"file": ("cc190.xlsx", workbook_bytes(report_rows()))}, data={"report_date": "2026-09-17"})
+            return await client.post(
+                "/api/imports/system",
+                files={"file": ("cc190.xlsx", workbook_bytes(report_rows()))},
+                data={"report_date": "2026-09-17", "cost_center_code": "190"},
+            )
         finally:
             await client.aclose()
 
@@ -246,7 +429,11 @@ def test_nonduplicate_integrity_error_is_audited_and_keeps_digest_file(
     async def exercise() -> httpx.Response:
         client, _ = await authenticated_client(UserRole.EDITOR)
         try:
-            return await client.post("/api/imports/system", files={"file": ("cc190.xlsx", content)}, data={"report_date": "2026-09-17"})
+            return await client.post(
+                "/api/imports/system",
+                files={"file": ("cc190.xlsx", content)},
+                data={"report_date": "2026-09-17", "cost_center_code": "190"},
+            )
         finally:
             await client.aclose()
 
@@ -274,7 +461,11 @@ def test_upload_and_archive_limits_reject_without_evidence_storage(database: ses
     async def submit() -> httpx.Response:
         client, _ = await authenticated_client(UserRole.EDITOR)
         try:
-            return await client.post("/api/imports/system", files={"file": ("cc190.xlsx", content)}, data={"report_date": "2026-09-17"})
+            return await client.post(
+                "/api/imports/system",
+                files={"file": ("cc190.xlsx", content)},
+                data={"report_date": "2026-09-17", "cost_center_code": "190"},
+            )
         finally:
             await client.aclose()
 
@@ -318,7 +509,7 @@ def test_oversized_declared_and_streamed_bodies_bypass_import_handler_and_write_
             declared = await client.post(
                 "/api/imports/system",
                 files={"file": ("cc190.xlsx", declared_content)},
-                data={"report_date": "2026-09-17"},
+                data={"report_date": "2026-09-17", "cost_center_code": "190"},
             )
             streamed = await client.post(
                 "/api/imports/system",

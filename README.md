@@ -56,10 +56,11 @@ digest path is hash-verified before it is reused.
 `IMPORT_MAX_UPLOAD_BYTES` limits each workbook upload to 25 MiB by default and
 `IMPORT_MAX_XLSX_UNCOMPRESSED_BYTES` limits the XLSX archive's declared expanded
 content to 100 MiB by default. Both values are positive byte counts. Uploads are
-read in bounded chunks and are not saved to evidence storage until they pass
-validation; rejected uploads leave no retained evidence file. The import route
-also rejects an oversized declared or streamed multipart body with HTTP 413
-before FastAPI's multipart parser runs.
+read in bounded chunks, and uploads rejected during validation leave no retained
+evidence file. If file publication succeeds but subsequent database persistence
+fails, an unreferenced digest-addressed file can remain for operator
+reconciliation. The import route also rejects an oversized declared or streamed
+multipart body with HTTP 413 before FastAPI's multipart parser runs.
 
 ## Initial administrator and local authentication
 
@@ -88,10 +89,14 @@ are stored only as Argon2id hashes.
 ## System-report import API
 
 `POST /api/imports/system` is an editor/admin-only multipart endpoint. Submit a
-`.xlsx` `file` and a `report_date` formatted as `YYYY-MM-DD`. It requires the
+`.xlsx` `file`, a `report_date` formatted as `YYYY-MM-DD`, and an explicit
+`cost_center_code` for an existing active cost center. The selected code is
+trimmed, and the workbook must contain exactly one `Nro. CC` value that matches
+it exactly. The endpoint never creates a cost center implicitly. It requires the
 named columns `Rubro`, `Categoría`, `Producto`, `Cód. Ident.`, `Identificación`,
 `Nro. CC`, `Centro de Costo`, and `Estado`; it rejects unreadable reports,
-blank or mixed cost-center codes, empty reports, and a duplicate SHA-256 file.
+blank or mixed cost-center codes, unknown or inactive selected centers, center
+mismatches, empty reports, and a duplicate SHA-256 file.
 
 Accepted reports retain the original file and every nonblank source row as
 immutable evidence. Each row stores ordered cells with their one-based column,
@@ -110,14 +115,17 @@ Example after authenticating with the session cookie:
 curl -X POST http://localhost:8080/api/imports/system \
   -b cookies.txt \
   -F file=@report.xlsx \
-  -F report_date=2026-09-17
+  -F report_date=2026-09-17 \
+  -F cost_center_code=190
 ```
 
 ## Physical-audit import API
 
 `POST /api/imports/audit` is an editor/admin-only multipart endpoint. Submit a
 `.xlsx` `file`, an explicit `report_date` (`YYYY-MM-DD`), and an explicit
-existing `cost_center_code`; neither value is inferred from the workbook.
+`cost_center_code` for an existing active cost center; neither value is inferred
+from the workbook. The selected code is trimmed, and unknown or inactive centers
+are rejected before evidence is stored.
 
 Only physical-audit sheets are imported. Row 3 must contain each exact A:K
 header once: `CANTIDAD`, `IDENTIFICACION`, `MAQUINA/EQUIPO`, `MARCA`, `MODELO `,

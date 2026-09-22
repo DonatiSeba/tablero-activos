@@ -21,6 +21,7 @@ from backend.app.models import (
     AssetAlias,
     AssetObservation,
     AuditCurrentState,
+    AuditLog,
     AuditCurrentStateProjection,
     AuditMatchReason,
     AuditMatchStrategy,
@@ -242,24 +243,180 @@ def test_editor_audit_import_creates_one_case_per_row_without_source_mutation(da
     assert "secret note" not in current_states.text
 
 
-def test_audit_import_rejects_unknown_center_duplicates_and_viewers_without_notes(database: sessionmaker[Session]) -> None:
+def test_audit_import_resolves_selected_center_before_reading_malformed_or_duplicate_content(
+    database: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
     add_user_and_center(database)
-    content = workbook_bytes({"Physical": [[1, "ID", "machine", "brand", "model", "works", "good", "private note", "yes", "190", "190"]]})
+    with database() as db:
+        db.add(CostCenter(code="300", name="Legacy", status=CostCenterStatus.INACTIVE))
+        db.commit()
+    duplicate_content = workbook_bytes(
+        {"Physical": [[1, "ID", "machine", "brand", "model", "works", "good", None, "yes", "190", "190"]]}
+    )
 
-    async def submit(data: dict[str, str]) -> httpx.Response:
+    async def exercise() -> list[httpx.Response]:
         active = await client()
         try:
-            return await active.post("/api/imports/audit", files={"file": ("physical.xlsx", content)}, data=data)
+            accepted = await active.post(
+                "/api/imports/audit",
+                files={"file": ("accepted.xlsx", duplicate_content)},
+                data={"report_date": "2026-06-27", "cost_center_code": "190"},
+            )
+            assert accepted.status_code == 201
+
+            def fail_if_read(_: object) -> bytes:
+                raise AssertionError("invalid selected centers must be rejected before reading workbook bytes")
+
+            monkeypatch.setattr(imports_api, "read_upload_content", fail_if_read)
+            responses = []
+            for center_code in ("missing", "300"):
+                for filename, content in (
+                    ("malformed.xlsx", b"not an xlsx"),
+                    ("duplicate.xlsx", duplicate_content),
+                ):
+                    responses.append(
+                        await active.post(
+                            "/api/imports/audit",
+                            files={"file": (filename, content)},
+                            data={"report_date": "2026-06-28", "cost_center_code": center_code},
+                        )
+                    )
+            return responses
         finally:
             await active.aclose()
 
-    unknown = asyncio.run(submit({"report_date": "2026-06-27", "cost_center_code": "missing"}))
-    assert unknown.status_code == 422 and "private note" not in unknown.text
-    accepted = asyncio.run(submit({"report_date": "2026-06-27", "cost_center_code": "190"}))
-    duplicate = asyncio.run(submit({"report_date": "2026-06-27", "cost_center_code": "190"}))
-    assert accepted.status_code == 201 and duplicate.status_code == 409
+    responses = asyncio.run(exercise())
+    assert [(response.status_code, response.json()["detail"]) for response in responses] == [
+        (422, "cost_center_code does not exist"),
+        (422, "cost_center_code does not exist"),
+        (422, "cost_center_code is inactive"),
+        (422, "cost_center_code is inactive"),
+    ]
     with database() as db:
-        assert db.scalar(select(ImportBatch).where(ImportBatch.source == "audit")) is not None
+        reasons = list(
+            db.scalars(
+                select(AuditLog.details)
+                .where(AuditLog.action == "imports.audit_rejected")
+                .order_by(AuditLog.created_at, AuditLog.id)
+            )
+        )
+        assert sorted(reason["reason"] for reason in reasons) == [
+            "inactive_cost_center",
+            "inactive_cost_center",
+            "unknown_cost_center",
+            "unknown_cost_center",
+        ]
+
+
+def test_audit_import_requires_explicit_active_center_and_preserves_duplicate_behavior(
+    database: sessionmaker[Session], tmp_path: Path
+) -> None:
+    add_user_and_center(database)
+    with database() as db:
+        db.add_all(
+            [
+                CostCenter(code="200", name="Finance", status=CostCenterStatus.ACTIVE),
+                CostCenter(code="300", name="Legacy", status=CostCenterStatus.INACTIVE),
+            ]
+        )
+        db.commit()
+    content = workbook_bytes(
+        {"Physical": [[1, "ID", "machine", "brand", "model", "works", "good", "private note", "yes", "190", "190"]]}
+    )
+    second_content = workbook_bytes(
+        {"Physical": [[1, "SECOND", "machine", "brand", "model", "works", "good", None, "yes", "190", "190"]]}
+    )
+
+    async def exercise() -> tuple[list[httpx.Response], httpx.Response, httpx.Response, httpx.Response]:
+        active = await client()
+        try:
+            rejected = []
+            for data in (
+                {"report_date": "2026-06-27"},
+                {"report_date": "2026-06-27", "cost_center_code": "   "},
+                {"report_date": "2026-06-27", "cost_center_code": "missing"},
+                {"report_date": "2026-06-27", "cost_center_code": "300"},
+            ):
+                rejected.append(
+                    await active.post(
+                        "/api/imports/audit",
+                        files={"file": ("physical.xlsx", content)},
+                        data=data,
+                    )
+                )
+            accepted = await active.post(
+                "/api/imports/audit",
+                files={"file": ("physical-200.xlsx", content)},
+                data={"report_date": "2026-06-27", "cost_center_code": " 200 "},
+            )
+            accepted_second_center = await active.post(
+                "/api/imports/audit",
+                files={"file": ("physical-190.xlsx", second_content)},
+                data={"report_date": "2026-06-28", "cost_center_code": "190"},
+            )
+            duplicate = await active.post(
+                "/api/imports/audit",
+                files={"file": ("again.xlsx", content)},
+                data={"report_date": "2026-06-29", "cost_center_code": "190"},
+            )
+            return rejected, accepted, accepted_second_center, duplicate
+        finally:
+            await active.aclose()
+
+    rejected, accepted, accepted_second_center, duplicate = asyncio.run(exercise())
+    assert [(response.status_code, response.json()["detail"]) for response in rejected] == [
+        (422, "cost_center_code is required"),
+        (422, "cost_center_code is required"),
+        (422, "cost_center_code does not exist"),
+        (422, "cost_center_code is inactive"),
+    ]
+    assert all("private note" not in response.text for response in rejected)
+    assert accepted.status_code == 201
+    assert accepted.json()["cost_center"]["code"] == "200"
+    assert accepted_second_center.status_code == 201
+    assert accepted_second_center.json()["cost_center"]["code"] == "190"
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "this file content was already imported"
+    with database() as db:
+        batches = list(db.scalars(select(ImportBatch).where(ImportBatch.source == "audit")))
+        observations = list(db.scalars(select(AssetObservation).where(AssetObservation.source == "audit")))
+        cases = list(db.scalars(select(ReconciliationCase)))
+        centers = {
+            center.code: center.id
+            for center in db.scalars(select(CostCenter).where(CostCenter.code.in_(["190", "200"])))
+        }
+        expected_batch_centers = {
+            "physical-190.xlsx": centers["190"],
+            "physical-200.xlsx": centers["200"],
+        }
+        assert len(batches) == 2
+        assert all(batch.cost_center_id == expected_batch_centers[batch.original_filename] for batch in batches)
+        batch_center_ids = {batch.id: batch.cost_center_id for batch in batches}
+        assert len(observations) == 2
+        assert all(
+            observation.cost_center_id == batch_center_ids[observation.import_batch_id]
+            for observation in observations
+        )
+        observation_center_ids = {observation.id: observation.cost_center_id for observation in observations}
+        assert len(cases) == 2
+        assert all(case.cost_center_id == observation_center_ids[case.audit_observation_id] for case in cases)
+        rejections = list(
+            db.scalars(
+                select(AuditLog)
+                .where(AuditLog.action == "imports.audit_rejected")
+                .order_by(AuditLog.created_at, AuditLog.id)
+            )
+        )
+        assert sorted(entry.details["reason"] for entry in rejections) == sorted(
+            [
+                "missing_cost_center_code",
+                "missing_cost_center_code",
+                "unknown_cost_center",
+                "inactive_cost_center",
+                "duplicate_sha256",
+            ]
+        )
+        assert len(list((tmp_path / "imports").rglob("*.xlsx"))) == 2
 
 
 def test_audit_body_limit_rejects_before_multipart_parser(monkeypatch: pytest.MonkeyPatch) -> None:

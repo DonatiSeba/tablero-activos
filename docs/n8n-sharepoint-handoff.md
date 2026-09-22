@@ -30,6 +30,7 @@ POST /api/imports/system
 Content-Type: multipart/form-data
 file=@<SharePoint-downloaded-workbook>.xlsx
 report_date=YYYY-MM-DD
+cost_center_code=<existing active cost-center code matching workbook Nro. CC>
 ```
 
 For a physical audit report, send:
@@ -39,13 +40,16 @@ POST /api/imports/audit
 Content-Type: multipart/form-data
 file=@<SharePoint-downloaded-workbook>.xlsx
 report_date=YYYY-MM-DD
-cost_center_code=<existing explicit cost-center code>
+cost_center_code=<existing active explicit cost-center code>
 ```
 
 The workflow must stream/download only the intended `.xlsx` item, preserve the
-report date and audit cost-center from an approved workflow field (never infer
-them silently), and keep workbook bytes out of workflow logs. Application size
-limits and validation remain authoritative.
+report date and selected cost center from approved workflow fields (never infer
+them silently), and keep workbook bytes out of workflow logs. Both sources
+require the selected center to exist and be active. A system workbook must
+contain exactly one `Nro. CC`, and that code must exactly match the selected
+code after surrounding whitespace is trimmed from the form field. Application
+size limits and validation remain authoritative.
 
 ## Retry and duplicate treatment
 
@@ -55,11 +59,13 @@ jitter, a finite attempt count, and an alert/dead-letter outcome after
 exhaustion; operations must choose the actual limits. Do not retry 4xx
 validation/authorization errors.
 
-A `409` response with `duplicate_sha256` means that identical immutable
-workbook content was already accepted or is present as an existing import. It
-is a terminal idempotency outcome, not a reason to upload indefinitely. Record
-it as duplicate/no-new-import and notify the designated operator if the
-workflow expected a new report. The workflow should treat a successful `201`
-or this duplicate result according to its approved source-processing policy;
-it must never delete or overwrite SharePoint evidence based solely on an HTTP
-attempt.
+A `409` response with `{"detail":"this file content was already imported"}`
+means that identical immutable workbook content was already accepted or is
+present as an existing import. The internal audit log records this outcome as
+`duplicate_sha256`, but that reason code is not part of the external API
+response. Treat the response as a terminal idempotency outcome, not a reason to
+upload indefinitely. Record it as duplicate/no-new-import and notify the
+designated operator if the workflow expected a new report. The workflow should
+treat a successful `201` or this duplicate result according to its approved
+source-processing policy; it must never delete or overwrite SharePoint evidence
+based solely on an HTTP attempt.
