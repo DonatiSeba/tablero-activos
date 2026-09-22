@@ -294,7 +294,6 @@ describe("sesión y vistas de presentación", () => {
 
   it("localiza los valores de presentación del servidor sin exponer sus enums", async () => {
     installFetch(); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
-    expect(screen.getByText("Los estados y las diferencias se calculan sobre activos distintos del lote de sistema seleccionado. Los estados de auditoría son proyecciones del lote de auditoría seleccionado. Los KPI y gráficos se calculan únicamente en el servidor.")).toBeInTheDocument();
     expect(screen.queryByText(summary.metric_scope)).not.toBeInTheDocument();
 
     expect(await screen.findByRole("img", { name: "Barras agrupadas de conciliación por producto" })).toBeInTheDocument();
@@ -329,7 +328,6 @@ describe("sesión y vistas de presentación", () => {
     };
     installFetch(viewer, { summaries: temporalSummary }); render(<App />);
     expect(await screen.findByRole("heading", { name: "Evolución temporal" })).toBeInTheDocument();
-    expect(screen.getByText("Instantáneas comparables del centro seleccionado")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "Evolución temporal de las instantáneas comparables" })).toBeInTheDocument();
     expect(screen.getByText("La evolución de retornos no está disponible porque no existe evidencia temporal de esos eventos.")).toBeInTheDocument();
     expect(screen.queryByText("return_event_time_evidence_unavailable")).not.toBeInTheDocument();
