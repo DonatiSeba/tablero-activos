@@ -33,8 +33,8 @@ The persistence model already supports multiple cost centers and multiple report
 - Forecast: approximately 450–700 authored changed lines across backend routes, import validation, frontend UI, tests, and documentation.
 - Strategy: feature-branch-chain (selected by the user after the above-budget forecast).
 - Slices: MCC-01 backend center lifecycle, MCC-02 explicit import binding, then MCC-03 frontend management/upload workflow.
-- Slice boundary: MCC-01 is commit `9b626e2`; MCC-02 starts after it.
-- Running authored lines: 890 committed after MCC-01; MCC-02 currently adds 553 uncommitted authored lines (tests, docs, and tracking included; no generated files).
+- Slice boundaries: MCC-01 is commit `9b626e2`; MCC-02 is commit `ff46e84`; MCC-03 starts after it.
+- Running authored lines: 1,719 across the three work units (tests, docs, and tracking included; no generated files).
 - Branch: `feat/asset-reconciliation-mvp`.
 
 ## TDD and checks
@@ -53,19 +53,19 @@ The persistence model already supports multiple cost centers and multiple report
   - Checks: focused backend tests, full backend regression suite, and whitespace check.
   - Commit: `9b626e2` (`feat: add cost center management contracts`).
 
-- [ ] MCC-02 Bind both import sources to an explicit active cost center.
-  - Status: verified; work-unit commit authorized and pending.
+- [x] MCC-02 Bind both import sources to an explicit active cost center.
+  - Status: completed.
   - Allowed edit candidates: `backend/app/imports.py`, `backend/app/system_imports.py` only if required, `backend/tests/test_system_imports.py`, `backend/tests/test_audit_imports.py`, and import API documentation under `docs/` or `README.md` when directly affected.
   - Outcome: system and audit uploads require an active selected center; system workbook codes must match it; imports remain immutable and historical; existing automation contracts are documented.
   - Checks: focused import tests, full backend regression suite, offline migration SQL if persistence changes, and whitespace check.
-  - Commit: authorized; identity pending.
+  - Commit: `ff46e84` (`feat: bind imports to cost centers`).
 
-- [ ] MCC-03 Deliver the multi-center management and upload UI.
-  - Status: pending.
+- [x] MCC-03 Deliver the multi-center management and upload UI.
+  - Status: completed; final work-unit commit authorized.
   - Allowed edit candidates: `frontend/src/app.tsx`, `frontend/src/app.test.tsx`, `frontend/src/styles.css` only if required.
   - Outcome: administrators can manage centers; editors/admins select an active center for both report types; loading/error states remain isolated; import history refreshes after successful uploads.
   - Checks: focused/full frontend tests, production build, full backend regression suite, and whitespace check.
-  - Commit: pending explicit user authorization.
+  - Commit: this closure commit (`feat: deliver multi-center management UI`); exact hash recorded in the Engram mirror after commit.
 
 ## Acceptance criteria
 - More than one active cost center can be created without importing a report first.
@@ -88,6 +88,10 @@ The persistence model already supports multiple cost centers and multiple report
 - 2026-09-22: MCC-02 writer reached 26 focused and 113 full passing tests, but independent verification failed on validation precedence and insufficient multi-center relationship assertions. A pre-existing post-storage/database-failure orphan-file risk was also identified; it is outside this task's explicit-center scope and must be documented truthfully rather than silently expanded into storage transaction redesign.
 - 2026-09-22: MCC-02 correction validates the selected center before workbook processing, proves every multi-center persistence relationship, and fixes external duplicate-response documentation. Final independent verification passed with 28 focused and 115 full backend tests; the parent spot-check reran 28 focused tests successfully. The coherent work unit is 553 authored lines.
 - 2026-09-22: The user authorized the MCC-02 work-unit commit and continuation into MCC-03. Push and deployment remain unauthorized.
+- 2026-09-22: MCC-02 completed in commit `ff46e84` with 559 authored lines. MCC-03 started as the final frontend work unit.
+- 2026-09-22: MCC-03 writer checks passed (34 frontend tests, production build, and 115 backend tests), but independent verification failed because management list/mutation requests lacked stale-response and unmount guards, and repeated row action buttons lacked center-specific accessible names. MCC-03 remained in progress for a bounded correction.
+- 2026-09-22: MCC-03 correction added monotonic request-version and unmount guards plus center-specific accessible action names. Final independent verification passed with 38 frontend tests, the production build, and 115 backend tests; the parent spot-check reran all 38 frontend tests successfully. The work unit contains 270 authored lines.
+- 2026-09-22: The user authorized the final MCC-03 work-unit commit and feature closure. Push and deployment remain unauthorized.
 
 ## Verification evidence
 - MCC-01 initial writer: `python -m pytest backend/tests/test_cost_centers.py` passed (8 tests); `python -m pytest backend/tests` passed (103 tests); `git diff --check` passed with an LF-to-CRLF working-copy warning.
@@ -98,6 +102,10 @@ The persistence model already supports multiple cost centers and multiple report
 - MCC-02 initial independent verification: FAIL because center lifecycle validation followed workbook parsing/digest checks and tests did not fully assert batch/observation/case center relationships. It also surfaced the pre-existing possibility of a digest file remaining after database persistence failure.
 - MCC-02 final independent verification: PASS; all prior implementation and documentation findings closed, 28 focused tests passed, 115 full backend tests passed, and the staged index was clean.
 - MCC-02 parent spot-check: 28 focused import tests passed; cached diff and whitespace checks passed.
+- MCC-03 initial writer: 34 frontend tests passed; production build passed with the existing chunk-size warning; 115 backend tests passed; whitespace and cached-diff checks passed.
+- MCC-03 initial independent verification: FAIL on lifecycle safety for management requests and ambiguous repeated action-button accessible names.
+- MCC-03 final independent verification: PASS; prior findings closed, 38 frontend tests passed, production build passed with the existing chunk-size warning, 115 backend tests passed, and the staged index was clean.
+- MCC-03 parent spot-check: all 38 frontend tests passed; cached diff and whitespace checks passed.
 
 ## Next step
-Create the authorized MCC-02 work-unit commit, record its identity, then start MCC-03.
+After the authorized closure commit, the feature is complete locally. Push and deployment remain separate user decisions; live-browser E2E remains a production validation step.

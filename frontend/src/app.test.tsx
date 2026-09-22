@@ -67,9 +67,11 @@ const rubroChart: RubroChartFixture = {
   },
 };
 const importHistory = { items: [{ batch_id: "batch-1", source: "system", cost_center: { code: "190", name: "Principal" }, report_date: "2026-09-17", imported_at: "2026-09-17T10:00:00Z", imported_by_display_name: "Usuario editor", row_count: 4, status: "completed", warning_counts: {}, processing_counts: {} }], page: {} };
+const activeCostCenters = [{ id: "cc-190", code: "190", name: "Principal", status: "active", start_date: null, end_date: null, created_at: "2026-09-20T10:00:00Z", updated_at: "2026-09-20T10:00:00Z" }, { id: "cc-191", code: "191", name: "Centro secundario", status: "active", start_date: null, end_date: null, created_at: "2026-09-20T10:00:00Z", updated_at: "2026-09-20T10:00:00Z" }];
+const inactiveCostCenter = { ...activeCostCenters[1], id: "cc-192", code: "192", name: "Centro histórico", status: "inactive" };
 const currentStates = { states: [{ asset_id: "asset-1", asset_code: "ACT-01", cost_center: { code: "190", name: "Principal" }, state: "returned", reason: "authorized_post_audit_column_l_return_marker", marker: { column: 12, category: "recognized_return", raw_value: "DEVOLVIO" }, source_report_date: "2026-09-17", projection_version: "audit_l_return_v1" }] };
 
-type FetchResponses = { summaries?: unknown; drilldown?: unknown; rubroChart?: unknown; importHistory?: unknown; currentStates?: unknown; users?: unknown };
+type FetchResponses = { summaries?: unknown; drilldown?: unknown; rubroChart?: unknown; importHistory?: unknown; currentStates?: unknown; users?: unknown; activeCostCenters?: unknown; allCostCenters?: unknown };
 type ProductChartOption = {
   yAxis?: { data?: string[] };
   series?: { emphasis?: { focus?: unknown }; data: { value: number | null; emphasis: { focus: readonly number[] } }[] }[];
@@ -99,6 +101,10 @@ function installFetch(user: object | null = viewer, responses: FetchResponses = 
     if (url === "/api/operations/import-history") return json(responses.importHistory ?? importHistory);
     if (url === "/api/current-states") return json(responses.currentStates ?? currentStates);
     if (url.startsWith("/api/imports/")) return json({ source: url.endsWith("system") ? "system" : "audit", row_count: 3 }, 201);
+    if (url === "/api/cost-centers?active_only=true") return json(responses.activeCostCenters ?? activeCostCenters);
+    if (url === "/api/cost-centers" && (!_init?.method || _init.method === "GET")) return json(responses.allCostCenters ?? [...activeCostCenters, inactiveCostCenter]);
+    if (url === "/api/cost-centers" && _init?.method === "POST") return json({ ...activeCostCenters[0], id: "cc-200", code: "200", name: "Nuevo centro" }, 201);
+    if (url.startsWith("/api/cost-centers/") && _init?.method === "PATCH") { const body = JSON.parse(String(_init.body)); const original = [...activeCostCenters, inactiveCostCenter].find((center) => url.endsWith(center.id)) ?? activeCostCenters[0]; return json({ ...original, ...body }); }
     if (url.startsWith("/api/users?")) return json(responses.users ?? usersResponse);
     if (url === "/api/users" && _init?.method === "POST") return json({ ...managedViewer, id: "u2", display_name: "Nueva Persona", temporary_password: "Temporal-very-secret" }, 201);
     if (url.endsWith("/reset-password")) return json({ ...managedViewer, temporary_password: "Reset-very-secret" });
@@ -136,16 +142,23 @@ describe("sesión y vistas de presentación", () => {
     expect(await screen.findByRole("heading", { name: "Reporte de sistema" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Auditoría física" })).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Historial de importaciones" })).toBeInTheDocument();
+    expect(await screen.findAllByRole("option", { name: "CC 190 · Principal" })).toHaveLength(2);
     await waitFor(() => expect(editorFetch.mock.calls.filter(([url]) => url === "/api/operations/import-history")).toHaveLength(1));
+    expect(editorFetch).toHaveBeenCalledWith("/api/cost-centers?active_only=true", expect.objectContaining({ credentials: "include" }));
+    expect(editorFetch.mock.calls.some(([url]) => url === "/api/cost-centers")).toBe(false);
+    expect(screen.queryByRole("heading", { name: "Administrar centros de costo" })).not.toBeInTheDocument();
     expect(editorFetch.mock.calls.some(([url]) => url === "/api/operations/review-queue")).toBe(false);
     editorView.unmount();
 
-    installFetch(admin); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
+    const adminFetch = installFetch(admin); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" });
     expect(screen.queryByRole("button", { name: "Operaciones" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
     expect(await screen.findByRole("heading", { name: "Reporte de sistema" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Auditoría física" })).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Historial de importaciones" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Administrar centros de costo" })).toBeInTheDocument();
+    expect(await screen.findByText("Centro histórico")).toBeInTheDocument();
+    expect(adminFetch).toHaveBeenCalledWith("/api/cost-centers", expect.objectContaining({ credentials: "include" }));
   });
 
   it("solicita los filtros predeterminados sin parámetros y los reinicia al cambiar de centro", async () => {
@@ -620,6 +633,8 @@ describe("sesión y vistas de presentación", () => {
     fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
     await screen.findByRole("heading", { name: "Historial de importaciones" });
     const form = screen.getByRole("heading", { name: "Reporte de sistema" }).closest("form")!;
+    expect(await within(form).findByRole("option", { name: "CC 191 · Centro secundario" })).toBeInTheDocument();
+    fireEvent.change(within(form).getByLabelText("Centro de costo"), { target: { value: "191" } });
     fireEvent.change(within(form).getByLabelText("Libro de trabajo"), { target: { files: [new File(["workbook"], "report.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })] } });
     fireEvent.change(within(form).getByLabelText("Fecha del reporte"), { target: { value: "2026-09-17" } }); fireEvent.submit(form);
     expect(await screen.findByText("La importación de Sistema fue aceptada con 3 filas.")).toBeInTheDocument();
@@ -627,6 +642,20 @@ describe("sesión y vistas de presentación", () => {
     await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === "/api/operations/import-history")).toHaveLength(2));
     expect(screen.getByText("La importación de Sistema fue aceptada con 3 filas.")).toBeInTheDocument();
     const uploadCall = fetchMock.mock.calls.find(([url]) => url === "/api/imports/system"); expect(uploadCall?.[1]?.body).toBeInstanceOf(FormData);
+    expect((uploadCall?.[1]?.body as FormData).get("cost_center_code")).toBe("191");
+  });
+
+  it("envía la auditoría como multipart con el centro seleccionado y conserva mensajes independientes", async () => {
+    const fetchMock = installFetch(editor); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" }); fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
+    const form = (await screen.findByRole("heading", { name: "Auditoría física" })).closest("form")!;
+    await within(form).findByRole("option", { name: "CC 191 · Centro secundario" });
+    fireEvent.change(within(form).getByLabelText("Centro de costo"), { target: { value: "191" } });
+    fireEvent.change(within(form).getByLabelText("Libro de trabajo"), { target: { files: [new File(["audit"], "audit.xlsx")] } });
+    fireEvent.change(within(form).getByLabelText("Fecha del reporte"), { target: { value: "2026-09-18" } }); fireEvent.submit(form);
+    expect(await within(form).findByText("La importación de Auditoría fue aceptada con 3 filas.")).toBeInTheDocument();
+    const uploadCall = fetchMock.mock.calls.find(([url]) => url === "/api/imports/audit");
+    expect(uploadCall?.[1]?.body).toBeInstanceOf(FormData);
+    expect((uploadCall?.[1]?.body as FormData).get("cost_center_code")).toBe("191");
   });
 
   it("mantiene los formularios habilitados y separa los errores de historial y carga", async () => {
@@ -651,6 +680,134 @@ describe("sesión y vistas de presentación", () => {
       "Revise los datos ingresados e intente nuevamente.",
     ]));
     expect(within(form).getByRole("button", { name: "Cargar reporte de sistema" })).toBeEnabled();
+  });
+
+  it("bloquea las cargas mientras obtiene centros y muestra estados vacíos o fallidos sin ocultar el historial", async () => {
+    const pendingCenters = deferredResponse(); const fetchMock = installFetch(editor); const defaultFetch = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => url === "/api/cost-centers?active_only=true" ? pendingCenters.promise : defaultFetch(url, init));
+    const loadingView = render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" }); fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
+    expect(await screen.findByText("Cargando centros de costo activos…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cargar reporte de sistema" })).toBeDisabled();
+    pendingCenters.resolve(await json([]));
+    expect(await screen.findByText("No hay centros de costo activos. Active o cree un centro antes de importar.")).toBeInTheDocument();
+    fireEvent.submit(screen.getByRole("heading", { name: "Reporte de sistema" }).closest("form")!);
+    expect(fetchMock.mock.calls.some(([url]) => url === "/api/imports/system")).toBe(false);
+    expect(screen.getByRole("heading", { name: "Historial de importaciones" })).toBeInTheDocument(); loadingView.unmount();
+
+    const failedFetch = installFetch(editor); const failedDefault = failedFetch.getMockImplementation()!;
+    failedFetch.mockImplementation((url: string, init?: RequestInit) => url === "/api/cost-centers?active_only=true" ? json({ detail: "centers outage" }, 503) : failedDefault(url, init));
+    render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" }); fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
+    expect(await screen.findByText("No se pudo confirmar ningún centro de costo activo. Las importaciones están temporalmente deshabilitadas.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cargar auditoría" })).toBeDisabled();
+    expect(screen.getByRole("heading", { name: "Historial de importaciones" })).toBeInTheDocument();
+  });
+
+  it("aísla los errores de administración cuando la lista activa permite importar", async () => {
+    const fetchMock = installFetch(admin); const defaultFetch = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => url === "/api/cost-centers" && (!init?.method || init.method === "GET") ? json({ detail: "management outage" }, 503) : defaultFetch(url, init));
+    render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" }); fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
+    const form = (await screen.findByRole("heading", { name: "Reporte de sistema" })).closest("form")!;
+    expect(await within(form).findByRole("option", { name: "CC 190 · Principal" })).toBeInTheDocument();
+    expect(within(form).getByRole("button", { name: "Cargar reporte de sistema" })).toBeEnabled();
+    expect(await screen.findByRole("alert")).toHaveTextContent("No se pudo completar la solicitud. Intente nuevamente.");
+  });
+
+  it("descarta listas de administración obsoletas sin finalizar la carga vigente", async () => {
+    const initialList = deferredResponse(); const refreshedList = deferredResponse(); const fetchMock = installFetch(admin); const defaultFetch = fetchMock.getMockImplementation()!; let managementReads = 0;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/api/cost-centers" && (!init?.method || init.method === "GET")) {
+        managementReads += 1; return managementReads === 1 ? initialList.promise : refreshedList.promise;
+      }
+      return defaultFetch(url, init);
+    });
+    render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" }); fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
+    const createForm = (await screen.findByRole("heading", { name: "Crear centro" })).closest("form")!;
+    fireEvent.change(within(createForm).getByLabelText("Código"), { target: { value: "200" } }); fireEvent.change(within(createForm).getByLabelText("Nombre"), { target: { value: "Nuevo centro" } }); fireEvent.submit(createForm);
+    await waitFor(() => expect(managementReads).toBe(2));
+    const management = screen.getByRole("heading", { name: "Administrar centros de costo" }).closest("section")!;
+
+    await act(async () => { initialList.resolve(await json([{ ...activeCostCenters[0], name: "Respuesta obsoleta" }])); });
+    expect(management).toHaveAttribute("aria-busy", "true");
+    expect(within(management).queryByText("Respuesta obsoleta")).not.toBeInTheDocument();
+    expect(within(management).getByText("Cargando centros de costo…")).toBeInTheDocument();
+
+    await act(async () => { refreshedList.resolve(await json([{ ...activeCostCenters[0], id: "cc-200", code: "200", name: "Nuevo centro" }])); });
+    expect(await within(management).findByText("Nuevo centro")).toBeInTheDocument();
+    await waitFor(() => expect(management).toHaveAttribute("aria-busy", "false"));
+    expect(within(management).queryByText("Respuesta obsoleta")).not.toBeInTheDocument();
+  });
+
+  it("descarta errores tardíos de una lista anterior a la actualización", async () => {
+    const initialList = deferredResponse(); const fetchMock = installFetch(admin); const defaultFetch = fetchMock.getMockImplementation()!; let managementReads = 0;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/api/cost-centers" && (!init?.method || init.method === "GET")) {
+        managementReads += 1;
+        return managementReads === 1 ? initialList.promise : json([{ ...activeCostCenters[0], id: "cc-200", code: "200", name: "Nuevo centro" }]);
+      }
+      return defaultFetch(url, init);
+    });
+    render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" }); fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
+    const createForm = (await screen.findByRole("heading", { name: "Crear centro" })).closest("form")!;
+    fireEvent.change(within(createForm).getByLabelText("Código"), { target: { value: "200" } }); fireEvent.change(within(createForm).getByLabelText("Nombre"), { target: { value: "Nuevo centro" } }); fireEvent.submit(createForm);
+    const management = screen.getByRole("heading", { name: "Administrar centros de costo" }).closest("section")!;
+    expect(await within(management).findByText("Nuevo centro")).toBeInTheDocument();
+
+    await act(async () => { initialList.resolve(await json({ detail: "late outage" }, 503)); });
+    expect(within(management).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(management).getByText("Nuevo centro")).toBeInTheDocument();
+  });
+
+  it("ignora la lista de administración cuando la vista se desmonta", async () => {
+    const pendingList = deferredResponse(); const fetchMock = installFetch(admin); const defaultFetch = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => url === "/api/cost-centers" && (!init?.method || init.method === "GET") ? pendingList.promise : defaultFetch(url, init));
+    render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" }); fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
+    await screen.findByRole("heading", { name: "Administrar centros de costo" });
+    fireEvent.click(screen.getByRole("button", { name: "Dashboard" }));
+    await act(async () => { pendingList.resolve(await json([{ ...activeCostCenters[0], name: "Centro tardío" }])); });
+    expect(screen.getByRole("heading", { name: "Conciliación de activos" })).toBeInTheDocument();
+    expect(screen.queryByText("Centro tardío")).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/cost-centers")).toHaveLength(1);
+  });
+
+  it("cancela continuaciones, refrescos y callbacks de mutación al desmontarse", async () => {
+    const pendingCreate = deferredResponse(); const fetchMock = installFetch(admin); const defaultFetch = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => url === "/api/cost-centers" && init?.method === "POST" ? pendingCreate.promise : defaultFetch(url, init));
+    render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" }); fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
+    const createForm = (await screen.findByRole("heading", { name: "Crear centro" })).closest("form")!; await within(createForm).findByRole("button", { name: "Crear centro" });
+    const codeInput = within(createForm).getByLabelText("Código");
+    fireEvent.change(codeInput, { target: { value: "200" } }); fireEvent.change(within(createForm).getByLabelText("Nombre"), { target: { value: "Nuevo centro" } }); fireEvent.submit(createForm);
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url, init]) => url === "/api/cost-centers" && init?.method === "POST")).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: "Dashboard" }));
+    await act(async () => { pendingCreate.resolve(await json({ ...activeCostCenters[0], id: "cc-200", code: "200", name: "Nuevo centro" }, 201)); });
+
+    expect(screen.getByRole("heading", { name: "Conciliación de activos" })).toBeInTheDocument();
+    expect(codeInput).toHaveValue("200");
+    expect(fetchMock.mock.calls.filter(([url, init]) => url === "/api/cost-centers" && (!init?.method || init.method === "GET"))).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/cost-centers?active_only=true")).toHaveLength(1);
+    expect(screen.queryByText("El centro CC 200 fue creado.")).not.toBeInTheDocument();
+  });
+
+  it("permite al administrador crear, editar y activar o desactivar centros", async () => {
+    const fetchMock = installFetch(admin); render(<App />); await screen.findByRole("heading", { name: "Conciliación de activos" }); fireEvent.click(screen.getByRole("button", { name: "Importaciones" }));
+    const createForm = (await screen.findByRole("heading", { name: "Crear centro" })).closest("form")!;
+    fireEvent.change(within(createForm).getByLabelText("Código"), { target: { value: "200" } }); fireEvent.change(within(createForm).getByLabelText("Nombre"), { target: { value: "Nuevo centro" } }); fireEvent.submit(createForm);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/cost-centers", expect.objectContaining({ method: "POST", body: JSON.stringify({ code: "200", name: "Nuevo centro" }) })));
+    expect(await screen.findByText("El centro CC 200 fue creado.")).toBeInTheDocument();
+
+    const management = screen.getByRole("heading", { name: "Administrar centros de costo" }).closest("section")!;
+    expect(within(management).getByRole("button", { name: "Editar CC 190 · Principal" })).toBeInTheDocument();
+    expect(within(management).getByRole("button", { name: "Desactivar CC 191 · Centro secundario" })).toBeInTheDocument();
+    expect(within(management).getByRole("button", { name: "Activar CC 192 · Centro histórico" })).toBeInTheDocument();
+    fireEvent.click(within(management).getByRole("button", { name: "Editar CC 190 · Principal" }));
+    const editForm = screen.getByRole("heading", { name: "Editar CC 190" }).closest("form")!;
+    fireEvent.change(within(editForm).getByLabelText("Nombre"), { target: { value: "Principal actualizado" } }); fireEvent.change(within(editForm).getByLabelText("Estado"), { target: { value: "inactive" } }); fireEvent.submit(editForm);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/cost-centers/cc-190", expect.objectContaining({ method: "PATCH", body: JSON.stringify({ name: "Principal actualizado", status: "inactive" }) })));
+    await waitFor(() => expect(within(management).getByRole("button", { name: "Desactivar CC 190 · Principal" })).toBeEnabled());
+    fireEvent.click(within(management).getByRole("button", { name: "Desactivar CC 190 · Principal" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/cost-centers/cc-190", expect.objectContaining({ method: "PATCH", body: JSON.stringify({ status: "inactive" }) })));
+    await waitFor(() => expect(within(management).getByRole("button", { name: "Activar CC 192 · Centro histórico" })).toBeEnabled());
+    fireEvent.click(within(management).getByRole("button", { name: "Activar CC 192 · Centro histórico" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/cost-centers/cc-192", expect.objectContaining({ method: "PATCH", body: JSON.stringify({ status: "active" }) })));
   });
 
   it("reserva Usuarios para ADMIN y ofrece el cambio de contraseña a toda cuenta", async () => {
