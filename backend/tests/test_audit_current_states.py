@@ -47,8 +47,44 @@ def raw_l(value: object | None) -> dict[str, object]:
     return {"source_sheet": "Physical", "source_row": 4, "cells": [{"column": 12, "header": None, "value": value}]}
 
 
+BG_RETURN_FILL_SIGNATURE = [
+    {
+        "fill_type": "solid",
+        "foreground": {"type": "theme", "theme": 7, "tint": 0.5999938962981048},
+        "background": {"type": "indexed", "indexed": 64, "tint": 0.0},
+    }
+] * 8
+BG_PENDING_FILL_SIGNATURE = [
+    {
+        "fill_type": None,
+        "foreground": {"type": "rgb", "rgb": "00000000", "tint": 0.0},
+        "background": {"type": "rgb", "rgb": "00000000", "tint": 0.0},
+    }
+] * 8
+
+
+def bg_fill_signature(*, fill_type: str | None = "solid", theme: int = 7, tint: float = 0.5999938962981048) -> list[dict[str, object]]:
+    return [
+        {
+            "fill_type": fill_type,
+            "foreground": {"type": "theme", "theme": theme, "tint": tint},
+            "background": {"type": "indexed", "indexed": 64, "tint": 0.0},
+        }
+    ] * 8
+
+
+def raw_bg(fill_signature: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "source_sheet": "Activos en sistema BG Pag. 1",
+        "source_row": 2,
+        "cells": [{"column": 4, "header": "CODIGO DE INDENTIFICACION", "value": "BG-1"}],
+        "bg_direct_fill_signature": fill_signature,
+    }
+
+
 def add_resolved_audit(
-    db: Session, *, code: str, report_date: date, marker: object | None, asset: Asset | None = None
+    db: Session, *, code: str, report_date: date, marker: object | None, asset: Asset | None = None,
+    original_data: dict[str, object] | None = None,
 ) -> Asset:
     center = db.scalar(select(CostCenter).where(CostCenter.code == "190"))
     assert center is not None
@@ -72,7 +108,7 @@ def add_resolved_audit(
         event=ObservationEvent.SNAPSHOT,
         observed_on=report_date,
         cost_center_id=center.id,
-        original_data=raw_l(marker),
+        original_data=original_data if original_data is not None else raw_l(marker),
         quantity=Decimal("1"),
     )
     db.add(observation)
@@ -125,6 +161,73 @@ def test_recognized_marker_projects_returned_with_raw_provenance(db: Session) ->
     assert projection.reason == "authorized_post_audit_column_l_return_marker"
     source = db.get(AssetObservation, projection.audit_observation_id)
     assert source is not None and source.original_data["cells"][0]["value"] == "DEVOLVIO"
+
+
+def test_bg_direct_fill_projects_returned_or_pending_without_a_fabricated_column_l_source(db: Session) -> None:
+    returned = add_resolved_audit(
+        db, code="BG-returned", report_date=date(2026, 6, 27), marker=None, original_data=raw_bg(BG_RETURN_FILL_SIGNATURE)
+    )
+    pending = add_resolved_audit(
+        db, code="BG-pending", report_date=date(2026, 6, 27), marker=None, original_data=raw_bg(BG_PENDING_FILL_SIGNATURE)
+    )
+
+    counts = rebuild_audit_current_state_projections(db)
+    projections = {projection.asset_id: projection for projection in db.scalars(select(AuditCurrentStateProjection))}
+
+    assert counts == {"found": 0, "returned": 1, "pending": 1, "review_required": 0}
+    assert projections[returned.id].state is AuditCurrentState.RETURNED
+    assert projections[returned.id].marker_category is AuditReturnMarkerCategory.BG_DIRECT_FILL_RETURN
+    assert projections[returned.id].marker_column is None
+    assert projections[returned.id].marker_raw_value == BG_RETURN_FILL_SIGNATURE
+    assert projections[pending.id].state is AuditCurrentState.PENDING
+    assert projections[pending.id].marker_category is AuditReturnMarkerCategory.BG_DIRECT_FILL_PENDING
+    assert projections[pending.id].marker_column is None
+
+
+@pytest.mark.parametrize(
+    "fill_signature",
+    [
+        bg_fill_signature(theme=6),
+        bg_fill_signature(tint=0.5),
+        bg_fill_signature(fill_type="gray125"),
+        [*BG_RETURN_FILL_SIGNATURE[:7], BG_PENDING_FILL_SIGNATURE[0]],
+    ],
+    ids=["wrong-theme", "wrong-tint", "non-solid", "mismatched-cell"],
+)
+def test_bg_nonmatching_direct_fills_project_pending_not_returned(
+    db: Session, fill_signature: list[dict[str, object]]
+) -> None:
+    asset = add_resolved_audit(
+        db, code="BG-nonmatching", report_date=date(2026, 6, 27), marker=None, original_data=raw_bg(fill_signature)
+    )
+
+    assert rebuild_audit_current_state_projections(db) == {"found": 0, "returned": 0, "pending": 1, "review_required": 0}
+    projection = db.scalar(select(AuditCurrentStateProjection).where(AuditCurrentStateProjection.asset_id == asset.id))
+    assert projection is not None
+    assert projection.state is AuditCurrentState.PENDING
+    assert projection.marker_category is AuditReturnMarkerCategory.BG_DIRECT_FILL_PENDING
+
+
+def test_bg_direct_fill_respects_later_dates_and_same_date_marker_rank(db: Session) -> None:
+    later_pending = add_resolved_audit(
+        db, code="BG-later", report_date=date(2026, 6, 27), marker=None, original_data=raw_bg(BG_RETURN_FILL_SIGNATURE)
+    )
+    add_resolved_audit(
+        db, code="BG-later-pending", asset=later_pending, report_date=date(2026, 6, 28), marker=None,
+        original_data=raw_bg(BG_PENDING_FILL_SIGNATURE),
+    )
+    same_date = add_resolved_audit(
+        db, code="BG-same-date", report_date=date(2026, 6, 28), marker=None, original_data=raw_bg(BG_PENDING_FILL_SIGNATURE)
+    )
+    add_resolved_audit(
+        db, code="BG-same-date-returned", asset=same_date, report_date=date(2026, 6, 28), marker=None,
+        original_data=raw_bg(BG_RETURN_FILL_SIGNATURE),
+    )
+
+    assert rebuild_audit_current_state_projections(db) == {"found": 0, "returned": 1, "pending": 1, "review_required": 0}
+    projections = {projection.asset_id: projection for projection in db.scalars(select(AuditCurrentStateProjection))}
+    assert projections[later_pending.id].state is AuditCurrentState.PENDING
+    assert projections[same_date.id].state is AuditCurrentState.RETURNED
 
 
 def test_later_audit_date_overrides_earlier_return(db: Session) -> None:

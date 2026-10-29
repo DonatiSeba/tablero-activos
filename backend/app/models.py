@@ -81,16 +81,24 @@ class AuditMatchReason(str, enum.Enum):
 
 
 class AuditReturnMarkerCategory(str, enum.Enum):
-    """Interpretation of the immutable blank-header audit column L value."""
+    """Interpretation of immutable audit evidence without fabricating a source cell."""
 
     RECOGNIZED_RETURN = "recognized_return"
     AMBIGUOUS_RETURN = "ambiguous_return"
     UNMARKED_UNKNOWN = "unmarked_unknown"
+    BG_DIRECT_FILL_RETURN = "bg_direct_fill_return"
+    BG_DIRECT_FILL_PENDING = "bg_direct_fill_pending"
+
+
+class AuditMarkerSource(str, enum.Enum):
+    COLUMN_L_VALUE = "column_l_value"
+    BG_ROW_DIRECT_FILL = "bg_row_direct_fill"
 
 
 class AuditCurrentState(str, enum.Enum):
     FOUND = "found"
     RETURNED = "returned"
+    PENDING = "pending"
     REVIEW_REQUIRED = "review_required"
 
 
@@ -315,18 +323,23 @@ class ReconciliationCase(Base):
 class AuditCurrentStateProjection(Base):
     """Reproducible current audit state; it never changes the source evidence.
 
-    Version ``audit_l_return_v1`` implements the user's authorized assumption
-    that a recognized column-L return marker occurred after its audit snapshot.
+    Column-L projections retain their historical contract. BG page projections
+    identify a row direct-fill source and never claim a non-existent L cell.
     """
 
     __tablename__ = "audit_current_state_projections"
     __table_args__ = (
         UniqueConstraint("asset_id", "cost_center_id", name="audit_current_state_per_asset_cost_center"),
-        CheckConstraint("marker_column = 12", name="audit_current_state_marker_column_l"),
         CheckConstraint(
-            "(state = 'returned' AND marker_category = 'recognized_return') "
+            "(marker_source = 'column_l_value' AND marker_column = 12) "
+            "OR (marker_source = 'bg_row_direct_fill' AND marker_column IS NULL)",
+            name="audit_current_state_marker_source_location",
+        ),
+        CheckConstraint(
+            "(state = 'returned' AND marker_category IN ('recognized_return', 'bg_direct_fill_return')) "
             "OR (state = 'review_required' AND marker_category = 'ambiguous_return') "
-            "OR (state = 'found' AND marker_category = 'unmarked_unknown')",
+            "OR (state = 'found' AND marker_category = 'unmarked_unknown') "
+            "OR (state = 'pending' AND marker_category = 'bg_direct_fill_pending')",
             name="audit_current_state_matches_marker_category",
         ),
         CheckConstraint("length(projection_version) > 0", name="audit_current_state_projection_version_not_empty"),
@@ -349,10 +362,16 @@ class AuditCurrentStateProjection(Base):
     marker_category: Mapped[AuditReturnMarkerCategory] = mapped_column(
         persisted_enum(AuditReturnMarkerCategory, name="audit_return_marker_category"), nullable=False
     )
+    marker_source: Mapped[AuditMarkerSource] = mapped_column(
+        persisted_enum(AuditMarkerSource, name="audit_marker_source"),
+        nullable=False,
+        default=AuditMarkerSource.COLUMN_L_VALUE,
+        server_default=text("'column_l_value'"),
+    )
     # A scalar copy supports a minimal read API; the authoritative typed raw
-    # cell and its sheet/row provenance remain in AssetObservation.original_data.
+    # cell/fill and its sheet/row provenance remain in AssetObservation.original_data.
     marker_raw_value: Mapped[Any | None] = mapped_column(JSON_DOCUMENT, nullable=True)
-    marker_column: Mapped[int] = mapped_column(nullable=False, default=12, server_default=text("12"))
+    marker_column: Mapped[int | None] = mapped_column(nullable=True, default=12, server_default=text("12"))
     reason: Mapped[str] = mapped_column(String(128), nullable=False)
     projection_version: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

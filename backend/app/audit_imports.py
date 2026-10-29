@@ -36,6 +36,22 @@ AUDIT_HEADERS = (
     "CC  BG",
 )
 
+BG_AUDIT_HEADERS = {
+    "Activos en sistema BG Pag. 1": (
+        "RUBRO", "CATEGORIA", "PRODUCTO", "CODIGO DE INDENTIFICACION", "IDENTIFICACION", "NRO. DEPOSITO", "DEPOSITO", "ESTADO",
+    ),
+    "Activos en sistema BG Pag. 2": (
+        "RUBRO", "CATEGORIA", "PRODUCTO", "CODIGO DE IDENTIFICACION", "IDENTIFICACION", "NRO. DEPOSITO", "DEPOSITO", "ESTADO",
+    ),
+}
+BG_AUDIT_SHEETS = tuple(BG_AUDIT_HEADERS)
+BG_IDENTIFIER_COLUMN = 4
+BG_DIRECT_FILL_SIGNATURE_KEY = "bg_direct_fill_signature"
+BG_RETURN_FILL_SIGNATURE = {
+    "fill_type": "solid",
+    "foreground": {"type": "theme", "theme": 7, "tint": 0.5999938962981048},
+}
+
 
 @dataclass(frozen=True)
 class ParsedAuditRow:
@@ -74,12 +90,109 @@ def _quantity(value: Any) -> Decimal:
     return quantity
 
 
+def _color_signature(color: Any) -> dict[str, Any]:
+    """Render the stored color fields without resolving theme/table/CF styles."""
+    signature: dict[str, Any] = {"type": color.type, "tint": color.tint}
+    if color.type == "theme":
+        signature["theme"] = color.theme
+    elif color.type == "rgb":
+        signature["rgb"] = color.rgb
+    elif color.type == "indexed":
+        signature["indexed"] = color.indexed
+    elif color.type == "auto":
+        signature["auto"] = color.auto
+    return signature
+
+
+def _direct_fill_signature(cell: Any) -> dict[str, Any]:
+    """Capture only the direct fill stored on a cell, without style inference."""
+    return {
+        "fill_type": cell.fill.fill_type,
+        "foreground": _color_signature(cell.fill.fgColor),
+        "background": _color_signature(cell.fill.bgColor),
+    }
+
+
+def _is_bg_return_fill_signature(signature: list[dict[str, Any]]) -> bool:
+    """Classify only the explicitly confirmed direct-fill attributes."""
+    return len(signature) == 8 and all(
+        cell.get("fill_type") == BG_RETURN_FILL_SIGNATURE["fill_type"]
+        and cell.get("foreground") == BG_RETURN_FILL_SIGNATURE["foreground"]
+        for cell in signature
+    )
+
+
+def _parse_bg_audit_report(workbook: Any) -> ParsedAuditReport:
+    """Parse the complete, exact BG page pair and preserve row-fill evidence."""
+    present_sheets = [name for name in BG_AUDIT_SHEETS if name in workbook.sheetnames]
+    if present_sheets and len(present_sheets) != len(BG_AUDIT_SHEETS):
+        raise ImportValidationError(
+            "incomplete_bg_audit_profile",
+            "BG audit imports require both Activos en sistema BG page sheets",
+        )
+    if not present_sheets:
+        raise ImportValidationError("no_bg_audit_sheets", "workbook contains no BG audit sheets")
+
+    rows: list[ParsedAuditRow] = []
+    for sheet_name in BG_AUDIT_SHEETS:
+        worksheet = workbook[sheet_name]
+        header_values = tuple(next(worksheet.iter_rows(min_row=1, max_row=1, values_only=True), ()) or ())
+        positioned = tuple("" if index >= len(header_values) or header_values[index] is None else str(header_values[index]) for index in range(8))
+        if positioned != BG_AUDIT_HEADERS[sheet_name]:
+            raise ImportValidationError(
+                "invalid_bg_audit_layout",
+                "each BG audit page must contain its exact A:H headers on row 1",
+            )
+        for source_row, source_cells in enumerate(worksheet.iter_rows(min_row=2), start=2):
+            values = tuple(cell.value for cell in source_cells)
+            if _is_blank_row(values):
+                continue
+            cells = source_cells[:8]
+            original_data = {
+                "source_sheet": worksheet.title,
+                "source_row": source_row,
+                "cells": [
+                    {
+                        "column": index + 1,
+                        "header": _json_value(header_values[index]) if index < len(header_values) else None,
+                        "value": _json_value(cell.value),
+                    }
+                    for index, cell in enumerate(source_cells)
+                ],
+                BG_DIRECT_FILL_SIGNATURE_KEY: [_direct_fill_signature(cell) for cell in cells],
+            }
+            named_values = {
+                str(header_values[index]): _json_value(cell.value)
+                for index, cell in enumerate(cells)
+            }
+            # The import endpoint retains physical-audit reported-status behavior.
+            # BG has no FUNCIONAMIENTO column, so ESTADO supplies that derived field.
+            named_values["FUNCIONAMIENTO"] = _json_value(cells[7].value)
+            rows.append(
+                ParsedAuditRow(
+                    named_values=named_values,
+                    original_data=original_data,
+                    quantity=Decimal("1"),
+                    identifier=original_asset_code(cells[BG_IDENTIFIER_COLUMN - 1].value),
+                )
+            )
+    if not rows:
+        raise ImportValidationError("no_usable_rows", "workbook contains no usable BG audit rows")
+    return ParsedAuditReport(rows=tuple(rows), sheet_names=BG_AUDIT_SHEETS)
+
+
 def parse_audit_report(content: bytes) -> ParsedAuditReport:
-    """Read only sheets with the exact physical-audit row-three layout."""
+    """Read a strict BG page pair or the compatible physical-audit layout."""
     _validate_xlsx_archive(content)
     workbook = None
     try:
         workbook = load_workbook(filename=BytesIO(content), read_only=True, data_only=False)
+        if any(name in workbook.sheetnames for name in BG_AUDIT_SHEETS):
+            report = _parse_bg_audit_report(workbook)
+            workbook.close()
+            workbook = None
+            return report
+
         rows: list[ParsedAuditRow] = []
         audit_sheets: list[str] = []
         for worksheet in workbook.worksheets:

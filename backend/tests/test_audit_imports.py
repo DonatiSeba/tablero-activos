@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 from openpyxl import Workbook
+from openpyxl.styles import Color, PatternFill
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -134,6 +135,88 @@ def test_audit_parser_rejects_non_positive_or_non_numeric_quantities(quantity: o
     assert invalid.value.code == "invalid_quantity"
 
 
+BG_PAGE_HEADERS = {
+    "Activos en sistema BG Pag. 1": (
+        "RUBRO", "CATEGORIA", "PRODUCTO", "CODIGO DE INDENTIFICACION", "IDENTIFICACION", "NRO. DEPOSITO", "DEPOSITO", "ESTADO",
+    ),
+    "Activos en sistema BG Pag. 2": (
+        "RUBRO", "CATEGORIA", "PRODUCTO", "CODIGO DE IDENTIFICACION", "IDENTIFICACION", "NRO. DEPOSITO", "DEPOSITO", "ESTADO",
+    ),
+}
+BG_RETURN_FILL = PatternFill(fill_type="solid", fgColor=Color(theme=7, tint=0.5999938962981048))
+
+
+def bg_workbook_bytes(
+    rows_by_sheet: dict[str, list[tuple[list[object], bool]]], *, headers: dict[str, tuple[str, ...]] = BG_PAGE_HEADERS
+) -> bytes:
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    for sheet_name, rows in rows_by_sheet.items():
+        sheet = workbook.create_sheet(sheet_name)
+        sheet.append(list(headers[sheet_name]))
+        for values, returned in rows:
+            sheet.append(values)
+            if returned:
+                for cell in sheet[sheet.max_row][:8]:
+                    cell.fill = BG_RETURN_FILL
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def test_audit_parser_accepts_only_complete_bg_pages_and_preserves_direct_fill_evidence() -> None:
+    content = bg_workbook_bytes(
+        {
+            "Activos en sistema BG Pag. 1": [(["tools", "drills", "Product", " BG-01 ", "identifier", 1, "main", "active"], True)],
+            "Activos en sistema BG Pag. 2": [(["tools", "saws", "Other", "BG-02", "identifier", 1, "main", "active"], False)],
+        }
+    )
+
+    report = parse_audit_report(content)
+
+    assert report.sheet_names == ("Activos en sistema BG Pag. 1", "Activos en sistema BG Pag. 2")
+    assert [row.identifier for row in report.rows] == [" BG-01 ", "BG-02"]
+    assert [row.quantity for row in report.rows] == [1, 1]
+    returned, pending = report.rows
+    assert returned.original_data["source_sheet"] == "Activos en sistema BG Pag. 1"
+    assert returned.original_data["source_row"] == 2
+    assert returned.original_data["cells"][3] == {"column": 4, "header": "CODIGO DE INDENTIFICACION", "value": " BG-01 "}
+    assert returned.original_data["bg_direct_fill_signature"] == [
+        {
+            "fill_type": "solid",
+            "foreground": {"type": "theme", "theme": 7, "tint": 0.5999938962981048},
+            "background": {"type": "rgb", "rgb": "00000000", "tint": 0.0},
+        }
+    ] * 8
+    assert pending.original_data["bg_direct_fill_signature"] == [
+        {
+            "fill_type": None,
+            "foreground": {"type": "rgb", "rgb": "00000000", "tint": 0.0},
+            "background": {"type": "rgb", "rgb": "00000000", "tint": 0.0},
+        }
+    ] * 8
+
+    with pytest.raises(ImportValidationError) as incomplete:
+        parse_audit_report(
+            bg_workbook_bytes({"Activos en sistema BG Pag. 1": [([None] * 8, False)]})
+        )
+    assert incomplete.value.code == "incomplete_bg_audit_profile"
+
+    malformed_headers = dict(BG_PAGE_HEADERS)
+    malformed_headers["Activos en sistema BG Pag. 2"] = (*BG_PAGE_HEADERS["Activos en sistema BG Pag. 2"][:-1], "STATUS")
+    with pytest.raises(ImportValidationError) as malformed:
+        parse_audit_report(
+            bg_workbook_bytes(
+                {
+                    "Activos en sistema BG Pag. 1": [([None] * 8, False)],
+                    "Activos en sistema BG Pag. 2": [([None] * 8, False)],
+                },
+                headers=malformed_headers,
+            )
+        )
+    assert malformed.value.code == "invalid_bg_audit_layout"
+
+
 def test_audit_parser_skips_fully_blank_tail_rows() -> None:
     report = parse_audit_report(
         workbook_bytes({"Physical": [[1, "AUDIT-01", "machine"] + [None] * 8, [None] * 11]})
@@ -241,6 +324,52 @@ def test_editor_audit_import_creates_one_case_per_row_without_source_mutation(da
     assert review_required["marker"] == {"column": 12, "category": "ambiguous_return", "raw_value": "VOLVI� 4"}
     assert returned["projection_version"] == "audit_l_return_v1"
     assert "secret note" not in current_states.text
+
+
+def test_editor_bg_audit_import_matches_column_d_and_projects_fill_evidence(database: sessionmaker[Session]) -> None:
+    add_user_and_center(database)
+    with database() as db:
+        db.add_all(
+            [
+                Asset(original_code="BG-01", normalized_code="BG01"),
+                Asset(original_code="BG-02", normalized_code="BG02"),
+            ]
+        )
+        db.commit()
+    content = bg_workbook_bytes(
+        {
+            "Activos en sistema BG Pag. 1": [(["tools", "drills", "Product", "BG-01", "identifier", 1, "main", "active"], True)],
+            "Activos en sistema BG Pag. 2": [(["tools", "saws", "Other", "BG-02", "identifier", 1, "main", "active"], False)],
+        }
+    )
+
+    async def submit() -> httpx.Response:
+        active = await client()
+        try:
+            return await active.post(
+                "/api/imports/audit", files={"file": ("bg-audit.xlsx", content)},
+                data={"report_date": "2026-06-27", "cost_center_code": "190"},
+            )
+        finally:
+            await active.aclose()
+
+    response = asyncio.run(submit())
+    assert response.status_code == 201
+    assert response.json()["match_counts"] == {
+        "exact_original_code": 2,
+        "normalized_code": 0,
+        "missing_identifier": 0,
+        "no_normalized_candidate": 0,
+        "ambiguous_normalized_candidate": 0,
+    }
+    assert response.json()["current_state_counts"] == {"found": 0, "returned": 1, "review_required": 0, "pending": 1}
+    with database() as db:
+        observations = list(db.scalars(select(AssetObservation).where(AssetObservation.source == "audit").order_by(AssetObservation.created_at)))
+        projections = list(db.scalars(select(AuditCurrentStateProjection)))
+        assert observations[0].original_data["cells"][3]["value"] == "BG-01"
+        assert observations[0].original_data["bg_direct_fill_signature"][0]["foreground"]["theme"] == 7
+        assert {projection.marker_column for projection in projections} == {None}
+        assert {projection.state for projection in projections} == {AuditCurrentState.RETURNED, AuditCurrentState.PENDING}
 
 
 def test_audit_import_resolves_selected_center_before_reading_malformed_or_duplicate_content(
