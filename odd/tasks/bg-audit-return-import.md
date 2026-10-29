@@ -29,10 +29,11 @@ Import audit evidence from the two embedded `Activos en sistema BG Pag.*` sheets
 - [x] BAR-02 Verify parser, import integration, and projection precedence.
   - Checks: focused audit tests, full backend suite, `git diff --check`.
 
-- [ ] BAR-03 Obtain explicit commit authorization.
-  - Outcome: no commit until the user explicitly requests it.
+- [x] BAR-03 Obtain explicit commit authorization.
+  - Outcome: user explicitly authorized the commit and push to `feat/asset-reconciliation-mvp`.
 
 ## Evidence
 - 2026-10-29: Workbook inspection found 831 BG data rows: 331 rows with direct `solid` theme-7/tint-0.5999938962981048 fill and 500 non-blue rows. The user confirmed blue = returned and the rest = pending.
 - 2026-10-29: Independent verification blocked the initial implementation: PostgreSQL enum values cannot be consumed by new constraints in the same migration transaction. The bounded correction added an autocommit boundary and fill/tie-break coverage, but follow-up verification found the SQLite downgrade rebuild retained a check constraint over removed `marker_source`. That correction now drops the dependent enum check with the column, restoring the 0006 SQLite schema on downgrade.
 - 2026-10-29: Final independent verification approved BAR-01/BAR-02: full backend suite passed 123 tests, `git diff --check` passed, and the supplied workbook parsed as exactly 831 BG rows (331 returned, 500 pending). PostgreSQL upgrade logic was source-reviewed but not exercised against a live PostgreSQL server; PostgreSQL downgrade intentionally remains unsupported once BG-specific values exist.
+- 2026-10-29: BAR-01/BAR-02 committed as `74c839a` (`feat: import BG audit return states`). Native review preflight reported `rdd_disabled`; no review transaction was started.
