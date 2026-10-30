@@ -84,7 +84,7 @@ def raw_bg(fill_signature: list[dict[str, object]]) -> dict[str, object]:
 
 def add_resolved_audit(
     db: Session, *, code: str, report_date: date, marker: object | None, asset: Asset | None = None,
-    original_data: dict[str, object] | None = None,
+    original_data: dict[str, object] | None = None, batch_metadata: dict[str, object] | None = None,
 ) -> Asset:
     center = db.scalar(select(CostCenter).where(CostCenter.code == "190"))
     assert center is not None
@@ -99,6 +99,7 @@ def add_resolved_audit(
         original_filename=f"{code}-{report_date}.xlsx",
         sha256=f"{len(list(db.scalars(select(ImportBatch.id)))) + 1:064x}",
         row_count=1,
+        metadata_json=batch_metadata,
     )
     db.add(batch)
     db.flush()
@@ -182,6 +183,44 @@ def test_bg_direct_fill_projects_returned_or_pending_without_a_fabricated_column
     assert projections[pending.id].state is AuditCurrentState.PENDING
     assert projections[pending.id].marker_category is AuditReturnMarkerCategory.BG_DIRECT_FILL_PENDING
     assert projections[pending.id].marker_column is None
+
+
+def test_mixed_audit_excludes_manual_rows_but_preserves_legacy_physical_audit_state(db: Session) -> None:
+    mixed_metadata = {"historical_found": {"available": True, "total_bg_row_count": 1, "returned_bg_row_count": 1}}
+    legacy_asset = add_resolved_audit(db, code="legacy", report_date=date(2026, 6, 27), marker="DEVOLVIO")
+    manual_only_asset = add_resolved_audit(
+        db,
+        code="mixed-manual-only",
+        report_date=date(2026, 6, 28),
+        marker="DEVOLVIO",
+        batch_metadata=mixed_metadata,
+    )
+    add_resolved_audit(
+        db,
+        code="mixed-manual-replacement",
+        asset=legacy_asset,
+        report_date=date(2026, 6, 29),
+        marker=None,
+        batch_metadata=mixed_metadata,
+    )
+    bg_asset = add_resolved_audit(
+        db,
+        code="mixed-bg",
+        report_date=date(2026, 6, 29),
+        marker=None,
+        original_data=raw_bg(BG_RETURN_FILL_SIGNATURE),
+        batch_metadata=mixed_metadata,
+    )
+
+    assert rebuild_audit_current_state_projections(db) == {"found": 0, "returned": 2, "review_required": 0}
+    projections = {projection.asset_id: projection for projection in db.scalars(select(AuditCurrentStateProjection))}
+
+    assert set(projections) == {legacy_asset.id, bg_asset.id}
+    assert projections[legacy_asset.id].state is AuditCurrentState.RETURNED
+    assert projections[legacy_asset.id].marker_category is AuditReturnMarkerCategory.RECOGNIZED_RETURN
+    assert projections[bg_asset.id].state is AuditCurrentState.RETURNED
+    assert projections[bg_asset.id].marker_category is AuditReturnMarkerCategory.BG_DIRECT_FILL_RETURN
+    assert manual_only_asset.id not in projections
 
 
 @pytest.mark.parametrize(

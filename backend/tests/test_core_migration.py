@@ -19,6 +19,8 @@ from backend.app.models import (
     CostCenterStatus,
     ImportBatch,
     ImportBatchStatus,
+    HistoricalFoundEvidenceProjection,
+    HistoricalFoundLinkReason,
     ImportSource,
     ObservationEvent,
     ReconciliationResult,
@@ -86,6 +88,10 @@ def test_core_migration_matches_complete_model_inventory_and_constraints(tmp_pat
         set(constraint["column_names"]) == {"asset_id", "cost_center_id"}
         for constraint in inspector.get_unique_constraints("reconciliation_results")
     )
+    assert any(
+        set(constraint["column_names"]) == {"manual_observation_id"}
+        for constraint in inspector.get_unique_constraints("historical_found_evidence_projections")
+    )
 
     with engine.begin() as connection:
         connection.execute(
@@ -124,6 +130,44 @@ def test_core_migration_matches_complete_model_inventory_and_constraints(tmp_pat
         assert connection.execute(
             text("SELECT quantity FROM asset_observations WHERE id = '0000000000000000000000000000000003'")
         ).scalar_one() == 1
+        connection.execute(
+            text(
+                "INSERT INTO asset_observations "
+                "(id, import_batch_id, source, event, observed_on, original_data, quantity) "
+                "VALUES ('0000000000000000000000000000000004', "
+                "'0000000000000000000000000000000001', 'audit', 'snapshot', '2026-09-17', '{}', 1)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO historical_found_evidence_projections "
+                "(id, import_batch_id, manual_observation_id, link_reason) "
+                "VALUES ('0000000000000000000000000000000005', "
+                "'0000000000000000000000000000000001', "
+                "'0000000000000000000000000000000003', 'no_bg_candidate')"
+            )
+        )
+        with pytest.raises(IntegrityError):
+            connection.execute(
+                text(
+                    "INSERT INTO historical_found_evidence_projections "
+                    "(id, import_batch_id, manual_observation_id, bg_observation_id, link_strategy, link_reason) "
+                    "VALUES ('0000000000000000000000000000000006', "
+                    "'0000000000000000000000000000000001', "
+                    "'0000000000000000000000000000000004', "
+                    "'0000000000000000000000000000000003', 'exact_bg_code', 'no_bg_candidate')"
+                )
+            )
+        with pytest.raises(IntegrityError):
+            connection.execute(
+                text(
+                    "INSERT INTO historical_found_evidence_projections "
+                    "(id, import_batch_id, manual_observation_id, link_reason) "
+                    "VALUES ('0000000000000000000000000000000007', "
+                    "'0000000000000000000000000000000001', "
+                    "'0000000000000000000000000000000003', 'ambiguous_bg_candidate')"
+                )
+            )
 
         for statement in (
             "UPDATE import_batches SET row_count = 1 WHERE id = '0000000000000000000000000000000001'",

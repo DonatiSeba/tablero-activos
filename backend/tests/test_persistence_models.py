@@ -14,6 +14,7 @@ def test_core_model_metadata_contains_complete_domain_field_inventory() -> None:
         "import_batches": {"cost_center_id", "report_date", "status", "updated_at"},
         "asset_observations": {"reported_status", "quantity", "updated_at"},
         "reconciliation_cases": {"audit_observation_id", "candidate_asset_id", "match_strategy", "match_reason"},
+        "historical_found_evidence_projections": {"import_batch_id", "manual_observation_id", "bg_observation_id", "link_strategy", "link_reason"},
     }
 
     assert set(expected_columns) <= set(Base.metadata.tables)
@@ -39,6 +40,7 @@ def test_core_model_metadata_preserves_evidence_and_reconciliation_coverage() ->
     batches = Base.metadata.tables["import_batches"]
     results = Base.metadata.tables["reconciliation_results"]
     cases = Base.metadata.tables["reconciliation_cases"]
+    historical_found = Base.metadata.tables["historical_found_evidence_projections"]
 
     assert {"original_code", "normalized_code"} <= set(assets.c.keys())
     assert {"original_alias", "normalized_alias"} <= set(aliases.c.keys())
@@ -58,5 +60,15 @@ def test_core_model_metadata_preserves_evidence_and_reconciliation_coverage() ->
     assert any(
         "candidate_asset_id IS NOT NULL" in str(constraint.sqltext)
         for constraint in cases.constraints
+        if hasattr(constraint, "sqltext")
+    )
+    assert any(
+        constraint.columns.keys() == ["manual_observation_id"]
+        for constraint in historical_found.constraints
+        if hasattr(constraint, "columns")
+    )
+    assert any(
+        "bg_observation_id IS NOT NULL" in str(constraint.sqltext)
+        for constraint in historical_found.constraints
         if hasattr(constraint, "sqltext")
     )

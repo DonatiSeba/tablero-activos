@@ -21,7 +21,11 @@ from backend.app.models import (
     AuditCurrentStateProjection,
     AuditMatchReason,
     AuditMatchStrategy,
+    AuditMarkerSource,
     AuditReturnMarkerCategory,
+    HistoricalFoundEvidenceProjection,
+    HistoricalFoundLinkReason,
+    HistoricalFoundLinkStrategy,
     CostCenter,
     ImportBatch,
     ImportBatchStatus,
@@ -186,6 +190,16 @@ def test_dashboard_contracts_aggregate_server_data_and_redact_evidence(database:
         "unresolved_audit_case_count": 1,
         "not_in_management_system_for_cost_center_count": 2,
     }
+    assert summary["historical_found"] == {
+        "available": False,
+        "total_bg_row_count": None,
+        "found_evidence_row_count": None,
+        "found_reported_unit_count": None,
+        "returned_bg_row_count": None,
+        "uniquely_linked_bg_row_count": None,
+        "ambiguous_link_row_count": None,
+        "unlinked_found_row_count": None,
+    }
     donut = summary["charts"]["general_status_donut"]
     assert donut["available"] is True
     assert donut["segments"] == [
@@ -213,6 +227,128 @@ def test_dashboard_contracts_aggregate_server_data_and_redact_evidence(database:
     assert "sha256" not in str(history.json()) and "storage_path" not in str(history.json()) and "private.xlsx" not in str(history.json())
     assert queue.json()["queue_counts"] == {"unresolved_identifier": 1, "review_required_return": 1, "total": 2}
     assert queue.json()["page"]["has_more"] is True
+
+
+def test_dashboard_reports_historical_found_evidence_without_deriving_current_state_metrics(
+    database: sessionmaker[Session],
+) -> None:
+    populate(database)
+    with database() as db:
+        center = db.scalar(select(CostCenter).where(CostCenter.code == "190"))
+        asset = db.scalar(select(Asset).where(Asset.original_code == "A-1"))
+        assert center is not None and asset is not None
+        audit = _batch(
+            db,
+            center,
+            ImportSource.AUDIT,
+            date(2026, 7, 1),
+            99,
+            {"historical_found": {"available": True, "total_bg_row_count": 5, "returned_bg_row_count": 1}},
+        )
+        manual_observations = [
+            AssetObservation(
+                import_batch_id=audit.id,
+                source=ImportSource.AUDIT,
+                event=ObservationEvent.SNAPSHOT,
+                observed_on=audit.report_date,
+                cost_center_id=center.id,
+                original_data={"cells": []},
+                quantity=Decimal(quantity),
+            )
+            for quantity in (2, 3, 4, 1, 1)
+        ]
+        bg_observations = [
+            AssetObservation(
+                import_batch_id=audit.id,
+                source=ImportSource.AUDIT,
+                event=ObservationEvent.SNAPSHOT,
+                observed_on=audit.report_date,
+                cost_center_id=center.id,
+                original_data={"cells": []},
+                quantity=Decimal("1"),
+            )
+            for _ in range(5)
+        ]
+        db.add_all((*manual_observations, *bg_observations))
+        db.flush()
+        current_state = db.scalar(
+            select(AuditCurrentStateProjection).where(
+                AuditCurrentStateProjection.asset_id == asset.id,
+                AuditCurrentStateProjection.cost_center_id == center.id,
+            )
+        )
+        assert current_state is not None
+        db.add_all(
+            (
+                HistoricalFoundEvidenceProjection(
+                    import_batch_id=audit.id,
+                    manual_observation_id=manual_observations[0].id,
+                    bg_observation_id=bg_observations[0].id,
+                    link_strategy=HistoricalFoundLinkStrategy.EXACT_BG_CODE,
+                ),
+                HistoricalFoundEvidenceProjection(
+                    import_batch_id=audit.id,
+                    manual_observation_id=manual_observations[1].id,
+                    bg_observation_id=bg_observations[1].id,
+                    link_strategy=HistoricalFoundLinkStrategy.WHITESPACE_NORMALIZED_BG_CODE,
+                ),
+                HistoricalFoundEvidenceProjection(
+                    import_batch_id=audit.id,
+                    manual_observation_id=manual_observations[2].id,
+                    bg_observation_id=bg_observations[2].id,
+                    link_strategy=HistoricalFoundLinkStrategy.EMBEDDED_IDENTIFIER_OR_SERIAL,
+                ),
+                HistoricalFoundEvidenceProjection(
+                    import_batch_id=audit.id,
+                    manual_observation_id=manual_observations[3].id,
+                    link_reason=HistoricalFoundLinkReason.AMBIGUOUS_BG_CANDIDATE,
+                ),
+                HistoricalFoundEvidenceProjection(
+                    import_batch_id=audit.id,
+                    manual_observation_id=manual_observations[4].id,
+                    link_reason=HistoricalFoundLinkReason.NO_BG_CANDIDATE,
+                ),
+                ReconciliationCase(
+                    audit_observation_id=bg_observations[0].id,
+                    cost_center_id=center.id,
+                    candidate_asset_id=asset.id,
+                    match_strategy=AuditMatchStrategy.EXACT_ORIGINAL_CODE,
+                ),
+            )
+        )
+        current_state.audit_observation_id = bg_observations[0].id
+        current_state.state = AuditCurrentState.RETURNED
+        current_state.marker_category = AuditReturnMarkerCategory.BG_DIRECT_FILL_RETURN
+        current_state.marker_source = AuditMarkerSource.BG_ROW_DIRECT_FILL
+        current_state.marker_column = None
+        current_state.reason = "confirmed_bg_direct_fill_return_marker"
+        current_state.projection_version = "bg_direct_fill_return_v1"
+        db.commit()
+
+    async def exercise() -> httpx.Response:
+        api = await client()
+        try:
+            assert (await api.post("/api/auth/login", json={"username": "viewer", "password": "password"})).status_code == 200
+            return await api.get("/api/dashboard/summaries?cost_center_code=190")
+        finally:
+            await api.aclose()
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 200
+    summary = response.json()["summaries"][0]
+    assert summary["historical_found"] == {
+        "available": True,
+        "total_bg_row_count": 5,
+        "found_evidence_row_count": 5,
+        "found_reported_unit_count": 11,
+        "returned_bg_row_count": 1,
+        "uniquely_linked_bg_row_count": 3,
+        "ambiguous_link_row_count": 1,
+        "unlinked_found_row_count": 1,
+    }
+    assert summary["metrics"]["found_count"] == 0
+    assert summary["metrics"]["returned_count"] == 1
+    assert summary["metrics"]["pending_not_accounted_count"] == 1
 
 
 def test_dashboard_counts_selected_system_omissions_without_other_cost_center_disclosure(database: sessionmaker[Session]) -> None:

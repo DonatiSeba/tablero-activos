@@ -93,9 +93,22 @@ def _marker_rank(marker: AuditReturnMarker) -> int:
     }[marker.category]
 
 
+def _is_current_state_candidate(observation: AssetObservation, batch: ImportBatch) -> bool:
+    """Exclude manual evidence from mixed workbooks' exclusive state projection."""
+    metadata = batch.metadata_json
+    historical_found = metadata.get("historical_found") if isinstance(metadata, dict) else None
+    if isinstance(historical_found, dict) and historical_found.get("available") is True:
+        return BG_DIRECT_FILL_SIGNATURE_KEY in observation.original_data
+    # Legacy physical-audit-only workbooks intentionally retain their column-L behavior.
+    return True
+
+
 def rebuild_audit_current_state_projections(db: Session) -> dict[str, int]:
     """Recompute one current classification per resolved asset and cost center.
 
+    Mixed workbooks contribute only BG evidence; their manual observations are
+    historical-found evidence rather than competing current-state inputs.
+    Legacy physical-audit-only workbooks retain their column-L interpretation.
     Later report dates win. On an equal report date, this authorized marker
     interpretation ranks recognized returns over ambiguous markers over
     ordinary unmarked presence; it is not measured event time. The final
@@ -114,6 +127,8 @@ def rebuild_audit_current_state_projections(db: Session) -> dict[str, int]:
 
     candidates: dict[tuple[object, object], tuple[ReconciliationCase, AssetObservation, ImportBatch, AuditReturnMarker]] = {}
     for case, observation, batch in rows:
+        if not _is_current_state_candidate(observation, batch):
+            continue
         marker = audit_return_marker_from_original_data(observation.original_data)
         assert case.candidate_asset_id is not None
         key = (case.candidate_asset_id, case.cost_center_id)

@@ -11,8 +11,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .audit_current_states import rebuild_audit_current_state_projections
-from .audit_imports import match_audit_identifier, parse_audit_report
+from .audit_imports import _is_bg_return_fill_signature, match_audit_identifier, parse_audit_report
 from .auth import require_editor, write_audit_log
+from .historical_found import link_historical_found_rows
 from .db import get_db
 from .models import (
     Asset,
@@ -21,6 +22,7 @@ from .models import (
     AuditMatchStrategy,
     CostCenter,
     CostCenterStatus,
+    HistoricalFoundEvidenceProjection,
     ImportBatch,
     ImportBatchStatus,
     ImportSource,
@@ -316,6 +318,18 @@ def import_audit_report(
 
     try:
         storage_path, _ = store_original_file(content, digest)
+        historical_found_metadata = None
+        if report.is_mixed_audit:
+            bg_rows = [row for row in report.rows if row.source_kind == "bg"]
+            historical_found_metadata = {
+                "available": True,
+                "total_bg_row_count": report.bg_row_count,
+                "returned_bg_row_count": sum(
+                    1
+                    for row in bg_rows
+                    if _is_bg_return_fill_signature(row.original_data.get("bg_direct_fill_signature", []))
+                ),
+            }
         batch = ImportBatch(
             source=ImportSource.AUDIT,
             cost_center_id=cost_center.id,
@@ -325,12 +339,15 @@ def import_audit_report(
             sha256=digest,
             storage_path=storage_path,
             row_count=len(report.rows),
+            metadata_json={"historical_found": historical_found_metadata} if historical_found_metadata is not None else None,
             imported_by_user_id=user.id,
         )
         db.add(batch)
         db.flush()
         counts: dict[str, int] = {strategy.value: 0 for strategy in AuditMatchStrategy}
         counts.update({reason.value: 0 for reason in AuditMatchReason})
+        bg_evidence: list[tuple[AssetObservation, object]] = []
+        manual_evidence: list[tuple[AssetObservation, object]] = []
         for row in report.rows:
             observation = AssetObservation(
                 import_batch_id=batch.id,
@@ -361,6 +378,28 @@ def import_audit_report(
                     match_reason=match.reason,
                 )
             )
+            if row.source_kind == "bg":
+                bg_evidence.append((observation, row))
+            elif report.is_mixed_audit:
+                manual_evidence.append((observation, row))
+        if report.is_mixed_audit:
+            manual_rows = [row for _observation, row in manual_evidence]
+            bg_rows = [row for _observation, row in bg_evidence]
+            for (manual_observation, _manual_row), link in zip(
+                manual_evidence,
+                link_historical_found_rows(manual_rows, bg_rows),
+                strict=True,
+            ):
+                bg_observation = None if link.bg_index is None else bg_evidence[link.bg_index][0]
+                db.add(
+                    HistoricalFoundEvidenceProjection(
+                        import_batch_id=batch.id,
+                        manual_observation_id=manual_observation.id,
+                        bg_observation_id=None if bg_observation is None else bg_observation.id,
+                        link_strategy=link.strategy,
+                        link_reason=link.reason,
+                    )
+                )
         warnings = [
             {"code": reason.value, "row_count": counts[reason.value]}
             for reason in AuditMatchReason
@@ -399,5 +438,6 @@ def import_audit_report(
         "row_count": batch.row_count,
         "match_counts": counts,
         "current_state_counts": current_state_counts,
+        "historical_found": historical_found_metadata,
         "warnings": warnings,
     }

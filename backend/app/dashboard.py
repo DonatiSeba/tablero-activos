@@ -24,6 +24,8 @@ from .models import (
     AuditCurrentStateProjection,
     AuditReturnMarkerCategory,
     CostCenter,
+    HistoricalFoundEvidenceProjection,
+    HistoricalFoundLinkReason,
     ImportBatch,
     ImportBatchStatus,
     ImportSource,
@@ -249,6 +251,65 @@ def _summary_metrics(db: Session, system: ImportBatch | None, audit: ImportBatch
     return _summary_metrics_for_assets(db, None if system is None else _system_asset_ids(system), audit)
 
 
+def _historical_found_summary(db: Session, audit: ImportBatch | None) -> dict[str, int | bool | None]:
+    """Expose mixed-workbook evidence separately from mutually exclusive current states."""
+    metadata = audit.metadata_json if audit is not None and isinstance(audit.metadata_json, dict) else {}
+    profile = metadata.get("historical_found") if isinstance(metadata, dict) else None
+    if not isinstance(profile, dict) or profile.get("available") is not True:
+        return {
+            "available": False,
+            "total_bg_row_count": None,
+            "found_evidence_row_count": None,
+            "found_reported_unit_count": None,
+            "returned_bg_row_count": None,
+            "uniquely_linked_bg_row_count": None,
+            "ambiguous_link_row_count": None,
+            "unlinked_found_row_count": None,
+        }
+    counts = db.execute(
+        select(
+            func.count(HistoricalFoundEvidenceProjection.id).label("found_rows"),
+            func.coalesce(func.sum(AssetObservation.quantity), 0).label("reported_units"),
+            func.count(func.distinct(HistoricalFoundEvidenceProjection.bg_observation_id)).label("linked_bg_rows"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (HistoricalFoundEvidenceProjection.link_reason == HistoricalFoundLinkReason.AMBIGUOUS_BG_CANDIDATE, 1),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("ambiguous_rows"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (HistoricalFoundEvidenceProjection.link_reason == HistoricalFoundLinkReason.NO_BG_CANDIDATE, 1),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("unlinked_rows"),
+        )
+        .join(
+            AssetObservation,
+            AssetObservation.id == HistoricalFoundEvidenceProjection.manual_observation_id,
+        )
+        .where(HistoricalFoundEvidenceProjection.import_batch_id == audit.id)
+    ).one()
+    total_bg_rows = profile.get("total_bg_row_count")
+    returned_bg_rows = profile.get("returned_bg_row_count")
+    return {
+        "available": True,
+        "total_bg_row_count": total_bg_rows if isinstance(total_bg_rows, int) else 0,
+        "found_evidence_row_count": int(counts.found_rows),
+        "found_reported_unit_count": int(counts.reported_units),
+        "returned_bg_row_count": returned_bg_rows if isinstance(returned_bg_rows, int) else 0,
+        "uniquely_linked_bg_row_count": int(counts.linked_bg_rows),
+        "ambiguous_link_row_count": int(counts.ambiguous_rows),
+        "unlinked_found_row_count": int(counts.unlinked_rows),
+    }
+
+
 def _executive_metrics(metrics: dict[str, int | None]) -> dict[str, int | float | None]:
     """Expose the documented KPI names without making the client derive them."""
     system = metrics["current_system_distinct_asset_count"]
@@ -438,6 +499,7 @@ def dashboard_summaries(
                 "metrics": metrics,
                 "executive_metrics": executive_metrics,
                 "operational_issues": _operational_issues(metrics),
+                "historical_found": _historical_found_summary(db, audit),
                 "charts": {
                     "general_status_donut": _general_status_donut(executive_metrics, _source_freshness(system, audit)),
                     "time_evolution": _time_evolution(db, center),

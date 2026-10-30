@@ -5,7 +5,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Color, PatternFill
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.exc import IntegrityError
@@ -26,6 +26,9 @@ from backend.app.models import (
     AuditCurrentStateProjection,
     AuditMatchReason,
     AuditMatchStrategy,
+    HistoricalFoundEvidenceProjection,
+    HistoricalFoundLinkReason,
+    HistoricalFoundLinkStrategy,
     CostCenter,
     CostCenterStatus,
     ImportBatch,
@@ -217,6 +220,70 @@ def test_audit_parser_accepts_only_complete_bg_pages_and_preserves_direct_fill_e
     assert malformed.value.code == "invalid_bg_audit_layout"
 
 
+def mixed_workbook_bytes(
+    bg_rows_by_sheet: dict[str, list[tuple[list[object], bool]]],
+    manual_rows_by_sheet: dict[str, list[list[object]]],
+) -> bytes:
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    for sheet_name, rows in bg_rows_by_sheet.items():
+        sheet = workbook.create_sheet(sheet_name)
+        sheet.append(list(BG_PAGE_HEADERS[sheet_name]))
+        for values, returned in rows:
+            sheet.append(values)
+            if returned:
+                for cell in sheet[sheet.max_row][:8]:
+                    cell.fill = BG_RETURN_FILL
+    for sheet_name, rows in manual_rows_by_sheet.items():
+        sheet = workbook.create_sheet(sheet_name)
+        sheet.append(["Physical audit"])
+        sheet.append([])
+        sheet.append(list(AUDIT_HEADERS))
+        for row in rows:
+            sheet.append(row)
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def test_mixed_audit_parser_requires_five_layout_sheets_and_ignores_filled_blank_manual_rows() -> None:
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    for sheet_name in BG_PAGE_HEADERS:
+        sheet = workbook.create_sheet(sheet_name)
+        sheet.append(list(BG_PAGE_HEADERS[sheet_name]))
+        sheet.append(["r", "c", "p", sheet_name, "id", 1, "d", "active"])
+    for number in range(5):
+        sheet = workbook.create_sheet(f"Manual {number}")
+        sheet.append(["Physical audit"])
+        sheet.append([])
+        sheet.append(list(AUDIT_HEADERS))
+        sheet.append([None] * 11)
+        for cell in sheet[4]:
+            cell.fill = BG_RETURN_FILL
+    output = BytesIO()
+    workbook.save(output)
+
+    report = parse_audit_report(output.getvalue())
+
+    assert report.is_mixed_audit is True
+    assert report.bg_row_count == 2
+    assert report.manual_row_count == 0
+    assert len(report.rows) == 2
+
+    with pytest.raises(ImportValidationError) as invalid:
+        parse_audit_report(
+            mixed_workbook_bytes(
+                {
+                    "Activos en sistema BG Pag. 1": [(["r", "c", "p", "one", "id", 1, "d", "active"], False)],
+                    "Activos en sistema BG Pag. 2": [(["r", "c", "p", "two", "id", 1, "d", "active"], False)],
+                },
+                {"Only manual": [[1, "one"] + [None] * 9]},
+            )
+        )
+    assert invalid.value.code == "invalid_mixed_audit_profile"
+
+
 def test_audit_parser_skips_fully_blank_tail_rows() -> None:
     report = parse_audit_report(
         workbook_bytes({"Physical": [[1, "AUDIT-01", "machine"] + [None] * 8, [None] * 11]})
@@ -370,6 +437,104 @@ def test_editor_bg_audit_import_matches_column_d_and_projects_fill_evidence(data
         assert observations[0].original_data["bg_direct_fill_signature"][0]["foreground"]["theme"] == 7
         assert {projection.marker_column for projection in projections} == {None}
         assert {projection.state for projection in projections} == {AuditCurrentState.RETURNED, AuditCurrentState.PENDING}
+
+
+def test_mixed_audit_import_persists_historical_found_links_without_changing_bg_return_evidence(
+    database: sessionmaker[Session],
+) -> None:
+    add_user_and_center(database)
+    with database() as db:
+        db.add_all(
+            [
+                Asset(original_code="EXACT", normalized_code="EXACT"),
+                Asset(original_code="SPACECODE", normalized_code="SPACECODE"),
+                Asset(original_code="BG-123456", normalized_code="BG123456"),
+                Asset(original_code="DUP", normalized_code="DUP"),
+            ]
+        )
+        db.commit()
+    content = mixed_workbook_bytes(
+        {
+            "Activos en sistema BG Pag. 1": [
+                (["r", "c", "p", "EXACT", "identifier", 1, "d", "active"], True),
+                (["r", "c", "p", "SPACECODE", "identifier", 1, "d", "active"], False),
+                (["r", "c", "p", "BG-123456", "identifier", 1, "d", "active"], False),
+                (["r", "c", "p", "DUP", "identifier", 1, "d", "active"], False),
+            ],
+            "Activos en sistema BG Pag. 2": [
+                (["r", "c", "p", "DUP", "identifier", 1, "d", "active"], False),
+            ],
+        },
+        {
+            "Manual exact": [[2, "EXACT"] + [None] * 9],
+            "Manual whitespace": [[3, " SPACE CODE "] + [None] * 9],
+            "Manual serial": [[4, "NS 123456"] + [None] * 9, [4, "NS 1234"] + [None] * 9],
+            "Manual ambiguous": [[1, "DUP"] + [None] * 9],
+            "Manual unlinked": [[1, "NOT PRESENT"] + [None] * 9],
+        },
+    )
+    workbook = load_workbook(BytesIO(content))
+    workbook["Manual exact"]["A4"].fill = BG_RETURN_FILL
+    output = BytesIO()
+    workbook.save(output)
+    content = output.getvalue()
+
+    async def submit() -> httpx.Response:
+        active = await client()
+        try:
+            return await active.post(
+                "/api/imports/audit",
+                files={"file": ("mixed-audit.xlsx", content)},
+                data={"report_date": "2026-06-27", "cost_center_code": "190"},
+            )
+        finally:
+            await active.aclose()
+
+    response = asyncio.run(submit())
+    assert response.status_code == 201
+    assert response.json()["historical_found"] == {
+        "available": True,
+        "total_bg_row_count": 5,
+        "returned_bg_row_count": 1,
+    }
+    with database() as db:
+        batch = db.scalar(select(ImportBatch).where(ImportBatch.source == "audit"))
+        links = list(db.scalars(select(HistoricalFoundEvidenceProjection).order_by(HistoricalFoundEvidenceProjection.created_at)))
+        assert batch is not None
+        assert batch.metadata_json == {"historical_found": response.json()["historical_found"]}
+        assert len(links) == 6
+        assert {link.link_strategy for link in links} == {
+            HistoricalFoundLinkStrategy.EXACT_BG_CODE,
+            HistoricalFoundLinkStrategy.WHITESPACE_NORMALIZED_BG_CODE,
+            HistoricalFoundLinkStrategy.EMBEDDED_IDENTIFIER_OR_SERIAL,
+            None,
+        }
+        assert {link.link_reason for link in links if link.link_reason is not None} == {
+            HistoricalFoundLinkReason.AMBIGUOUS_BG_CANDIDATE,
+            HistoricalFoundLinkReason.NO_BG_CANDIDATE,
+        }
+        assert sum(link.bg_observation_id is not None for link in links) == 3
+        manual_observations = {
+            observation.id: observation
+            for observation in db.scalars(select(AssetObservation).where(AssetObservation.import_batch_id == batch.id))
+            if observation.original_data["source_sheet"].startswith("Manual")
+        }
+        links_by_manual_location = {
+            (
+                manual_observations[link.manual_observation_id].original_data["source_sheet"],
+                manual_observations[link.manual_observation_id].original_data["source_row"],
+            ): link
+            for link in links
+        }
+        assert links_by_manual_location[("Manual serial", 4)].link_strategy is HistoricalFoundLinkStrategy.EMBEDDED_IDENTIFIER_OR_SERIAL
+        assert links_by_manual_location[("Manual serial", 5)].bg_observation_id is None
+        assert links_by_manual_location[("Manual serial", 5)].link_reason is HistoricalFoundLinkReason.NO_BG_CANDIDATE
+        exact_manual = next(
+            observation
+            for observation in manual_observations.values()
+            if observation.original_data["source_sheet"] == "Manual exact"
+        )
+        assert exact_manual.original_data["manual_direct_fill_signature"][0]["fill_type"] == "solid"
 
 
 def test_audit_import_resolves_selected_center_before_reading_malformed_or_duplicate_content(

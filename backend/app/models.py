@@ -80,6 +80,17 @@ class AuditMatchReason(str, enum.Enum):
     AMBIGUOUS_NORMALIZED_CANDIDATE = "ambiguous_normalized_candidate"
 
 
+class HistoricalFoundLinkStrategy(str, enum.Enum):
+    EXACT_BG_CODE = "exact_bg_code"
+    WHITESPACE_NORMALIZED_BG_CODE = "whitespace_normalized_bg_code"
+    EMBEDDED_IDENTIFIER_OR_SERIAL = "embedded_identifier_or_serial"
+
+
+class HistoricalFoundLinkReason(str, enum.Enum):
+    NO_BG_CANDIDATE = "no_bg_candidate"
+    AMBIGUOUS_BG_CANDIDATE = "ambiguous_bg_candidate"
+
+
 class AuditReturnMarkerCategory(str, enum.Enum):
     """Interpretation of immutable audit evidence without fabricating a source cell."""
 
@@ -316,6 +327,40 @@ class ReconciliationCase(Base):
     )
     match_reason: Mapped[AuditMatchReason | None] = mapped_column(
         persisted_enum(AuditMatchReason, name="audit_match_reason"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class HistoricalFoundEvidenceProjection(Base):
+    """One durable conservative manual-to-BG relationship for mixed audit evidence."""
+
+    __tablename__ = "historical_found_evidence_projections"
+    __table_args__ = (
+        UniqueConstraint("manual_observation_id", name="historical_found_manual_observation_once"),
+        CheckConstraint(
+            "(bg_observation_id IS NOT NULL AND link_strategy IS NOT NULL AND link_reason IS NULL) "
+            "OR (bg_observation_id IS NULL AND link_strategy IS NULL AND link_reason IS NOT NULL)",
+            name="historical_found_link_valid_outcome",
+        ),
+        Index("ix_historical_found_evidence_projections_import_batch_id", "import_batch_id"),
+        Index("ix_historical_found_evidence_projections_bg_observation_id", "bg_observation_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    import_batch_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("import_batches.id", ondelete="RESTRICT"), nullable=False
+    )
+    manual_observation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("asset_observations.id", ondelete="RESTRICT"), nullable=False
+    )
+    bg_observation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("asset_observations.id", ondelete="RESTRICT"), nullable=True
+    )
+    link_strategy: Mapped[HistoricalFoundLinkStrategy | None] = mapped_column(
+        persisted_enum(HistoricalFoundLinkStrategy, name="historical_found_link_strategy"), nullable=True
+    )
+    link_reason: Mapped[HistoricalFoundLinkReason | None] = mapped_column(
+        persisted_enum(HistoricalFoundLinkReason, name="historical_found_link_reason"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
