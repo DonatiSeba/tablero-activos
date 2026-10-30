@@ -36,12 +36,23 @@ type TimeEvolution = {
   points: { report_date: string; system_count: number; found_in_cost_center_count: number; audit_snapshot_difference_count: number }[];
   return_evolution: { available: boolean; reason?: string | null; points: unknown[] };
 };
+type HistoricalFound = {
+  available: boolean;
+  total_bg_row_count: number | null;
+  found_evidence_row_count: number | null;
+  found_reported_unit_count: number | null;
+  returned_bg_row_count: number | null;
+  uniquely_linked_bg_row_count: number | null;
+  ambiguous_link_row_count: number | null;
+  unlinked_found_row_count: number | null;
+};
 type Summary = {
   cost_center: CostCenter;
   latest_sources: { system: Source; audit: Source };
   freshness: Freshness;
   executive_metrics: ExecutiveMetrics;
   operational_issues: OperationalIssues;
+  historical_found?: HistoricalFound;
   charts: { general_status_donut: DonutChart; time_evolution: TimeEvolution };
 };
 type SummariesResponse = { summaries: Summary[]; page: Page; selection_rule: string; metric_scope: string };
@@ -188,6 +199,22 @@ function Kpis({ metrics }: { metrics: ExecutiveMetrics }) {
     <Metric label="Retornados" value={metrics.returned_count} tone="cyan" />
     <Metric label="Diferencia pendiente" value={metrics.difference_count} tone="red" />
   </dl><dl className="supporting-metrics" aria-label="Indicadores complementarios"><div><dt>Contabilizados</dt><dd>{number(metrics.accounted_count)}</dd></div><div><dt>Cobertura</dt><dd>{percentage(metrics.coverage_percent)}</dd></div></dl></>;
+}
+function HistoricalFoundPanel({ metrics }: { metrics: HistoricalFound | undefined }) {
+  if (!metrics?.available) return null;
+  return <section className="panel historical-found-panel" aria-labelledby="historical-found-heading">
+    <div className="panel-heading"><div><h2 id="historical-found-heading">Evidencia histórica de relevamiento</h2><p>Conteos del libro histórico; no modifican los indicadores ni los gráficos del estado actual.</p></div><span className="chip">Evidencia suplementaria</span></div>
+    <dl className="metrics historical-found-metrics">
+      <Metric label="Total BG" value={metrics.total_bg_row_count} description="Filas BG" />
+      <Metric label="Encontrados en relevamiento" value={metrics.found_evidence_row_count} tone="green" description="Filas manuales no vacías" />
+      <Metric label="Devueltos" value={metrics.returned_bg_row_count} tone="cyan" description="Filas BG azules" />
+      <Metric label="Vinculados a BG" value={metrics.uniquely_linked_bg_row_count} description="Vínculos únicos conservadores" />
+      <Metric label="Evidencia manual ambigua" value={metrics.ambiguous_link_row_count} tone="yellow" description="Filas manuales" />
+      <Metric label="Evidencia manual sin vínculo" value={metrics.unlinked_found_row_count} tone="red" description="Filas manuales" />
+    </dl>
+    <p className="historical-found-units"><strong>Unidades manuales informadas:</strong> {number(metrics.found_reported_unit_count)}. Son evidencia suplementaria y no representan activos distintos.</p>
+    <p className="notice historical-found-overlap" role="note"><strong>Importante:</strong> los hallados y los devueltos pueden superponerse históricamente; no se suman entre sí.</p>
+  </section>;
 }
 function Donut({ chart }: { chart: DonutChart }) {
   if (!chart.available) return <Empty>{chartReason(chart.reason)}</Empty>;
@@ -442,6 +469,7 @@ function Dashboard() {
     {selected && <>
       <section className="context-card" aria-label="Contexto del centro de costo"><div><span>Centro seleccionado</span><strong>CC {selected.cost_center.code} · {selected.cost_center.name}</strong></div><SourceDates system={selected.latest_sources.system} audit={selected.latest_sources.audit} freshness={selected.freshness} /></section>
       <Kpis metrics={selected.executive_metrics} />
+      <HistoricalFoundPanel metrics={selected.historical_found} />
       <ErrorNotice error={drilldownError} />
       {!drilldown && !drilldownError && <div className="loading-card" role="status">Cargando conciliación agrupada…</div>}
       <div className="dashboard-grid dashboard-grid-primary"><section className="panel chart-panel"><div className="panel-heading"><div><h2>Conciliación por rubro</h2></div><span className="chip">Último corte</span></div>{drilldown ? <><StackedBars chart={drilldown.charts.primary_stacked_bar} /><ServerPagination page={drilldown.page} busy={drilldownLoading} label="Paginación del gráfico principal de conciliación" onNavigate={navigateDrilldown} /></> : <div className="chart-placeholder" />}</section><section className="panel chart-panel"><div className="panel-heading"><div><h2>Estado general</h2></div><span className="chip">{percentage(selected.executive_metrics.coverage_percent)} cobertura</span></div><Donut chart={drilldown?.charts.general_status_donut || selected.charts.general_status_donut} /></section></div>

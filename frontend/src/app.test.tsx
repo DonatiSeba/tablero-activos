@@ -14,6 +14,26 @@ const managedViewer = { ...viewer, id: "u2", email: "viewer@example.test", is_ac
 const usersResponse = { items: [managedViewer], total: 1, limit: 20, offset: 0 };
 const executiveMetrics = { system_count: 4, found_in_cost_center_count: 2, returned_count: 1, accounted_count: 3, difference_count: 1, coverage_percent: 75 };
 const operationalIssues = { physical_patrimonial_difference_count: 1, system_update_required_return_count: 1, system_data_quality_omission_count: 0, review_required_count: 0, unresolved_audit_case_count: 1, not_in_management_system_for_cost_center_count: 2 };
+type HistoricalFoundFixture = {
+  available: boolean;
+  total_bg_row_count: number | null;
+  found_evidence_row_count: number | null;
+  found_reported_unit_count: number | null;
+  returned_bg_row_count: number | null;
+  uniquely_linked_bg_row_count: number | null;
+  ambiguous_link_row_count: number | null;
+  unlinked_found_row_count: number | null;
+};
+const unavailableHistoricalFound: HistoricalFoundFixture = {
+  available: false,
+  total_bg_row_count: null,
+  found_evidence_row_count: null,
+  found_reported_unit_count: null,
+  returned_bg_row_count: null,
+  uniquely_linked_bg_row_count: null,
+  ambiguous_link_row_count: null,
+  unlinked_found_row_count: null,
+};
 type TemporalFixture = {
   available: boolean;
   reason?: string;
@@ -27,6 +47,7 @@ const summary = {
     freshness: { warning: true, status: "report_dates_differ", message: "ignored server text" },
     executive_metrics: executiveMetrics,
     operational_issues: operationalIssues,
+    historical_found: unavailableHistoricalFound,
     charts: {
       general_status_donut: { available: true, segments: [{ key: "found_in_cost_center", value: 2 }, { key: "returned", value: 1 }, { key: "difference", value: 1 }] },
       time_evolution: { available: false, reason: "fewer_than_two_comparable_snapshots", points: [], return_evolution: { available: false, reason: "return_event_time_evidence_unavailable", points: [] } } as TemporalFixture,
@@ -303,6 +324,56 @@ describe("sesión y vistas de presentación", () => {
     expect(screen.getAllByText("4").length).toBeGreaterThan(0);
     expect(screen.getByRole("img", { name: "Distribución general de conciliación" })).toBeInTheDocument();
     expect(screen.getByText("2026-09-17")).toBeInTheDocument(); expect(screen.getByText("2026-09-16")).toBeInTheDocument();
+  });
+
+  it("presenta la evidencia histórica disponible como métricas suplementarias", async () => {
+    const historicalSummary = structuredClone(summary);
+    historicalSummary.summaries[0].historical_found = {
+      available: true,
+      total_bg_row_count: 8,
+      found_evidence_row_count: 5,
+      found_reported_unit_count: 11,
+      returned_bg_row_count: 2,
+      uniquely_linked_bg_row_count: 3,
+      ambiguous_link_row_count: 1,
+      unlinked_found_row_count: 1,
+    };
+    installFetch(viewer, { summaries: historicalSummary }); render(<App />);
+
+    const panel = (await screen.findByRole("heading", { name: "Evidencia histórica de relevamiento" })).closest("section")!;
+    expect(within(panel).getByText("Total BG").closest(".metric")).toHaveTextContent("8");
+    expect(within(panel).getByText("Encontrados en relevamiento").closest(".metric")).toHaveTextContent("5");
+    expect(within(panel).getByText("Devueltos").closest(".metric")).toHaveTextContent("2");
+    expect(within(panel).getByText("Vinculados a BG").closest(".metric")).toHaveTextContent("3");
+    expect(within(panel).getByText("Evidencia manual ambigua").closest(".metric")).toHaveTextContent("1");
+    expect(within(panel).getByText("Evidencia manual sin vínculo").closest(".metric")).toHaveTextContent("1");
+    expect(within(panel).getByText("Unidades manuales informadas:").parentElement).toHaveTextContent("11");
+    expect(panel).toHaveTextContent("no representan activos distintos");
+  });
+
+  it("omite la evidencia histórica no disponible sin mostrar ceros", async () => {
+    installFetch(); render(<App />);
+    await screen.findByRole("heading", { name: "Conciliación de activos" });
+
+    expect(screen.queryByRole("heading", { name: "Evidencia histórica de relevamiento" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Total BG")).not.toBeInTheDocument();
+  });
+
+  it("advierte que los hallados y devueltos históricos pueden superponerse", async () => {
+    const historicalSummary = structuredClone(summary);
+    historicalSummary.summaries[0].historical_found = {
+      available: true,
+      total_bg_row_count: 3,
+      found_evidence_row_count: 2,
+      found_reported_unit_count: 2,
+      returned_bg_row_count: 2,
+      uniquely_linked_bg_row_count: 1,
+      ambiguous_link_row_count: 0,
+      unlinked_found_row_count: 1,
+    };
+    installFetch(viewer, { summaries: historicalSummary }); render(<App />);
+
+    expect(await screen.findByText("los hallados y los devueltos pueden superponerse históricamente; no se suman entre sí.")).toBeInTheDocument();
   });
 
   it("localiza los valores de presentación del servidor sin exponer sus enums", async () => {
