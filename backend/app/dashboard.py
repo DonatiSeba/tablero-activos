@@ -251,21 +251,41 @@ def _summary_metrics(db: Session, system: ImportBatch | None, audit: ImportBatch
     return _summary_metrics_for_assets(db, None if system is None else _system_asset_ids(system), audit)
 
 
-def _historical_found_summary(db: Session, audit: ImportBatch | None) -> dict[str, int | bool | None]:
-    """Expose mixed-workbook evidence separately from mutually exclusive current states."""
+def _historical_found_unavailable(reason: str) -> dict[str, object]:
+    return {
+        "available": False,
+        "reason": reason,
+        "primary_metrics": None,
+        "total_bg_row_count": None,
+        "found_evidence_row_count": None,
+        "found_reported_unit_count": None,
+        "returned_bg_row_count": None,
+        "uniquely_linked_bg_row_count": None,
+        "ambiguous_link_row_count": None,
+        "unlinked_found_row_count": None,
+    }
+
+
+def _historical_found_summary(db: Session, audit: ImportBatch | None) -> dict[str, object]:
+    """Expose mixed-workbook evidence and its non-exclusive physical-audit KPIs."""
     metadata = audit.metadata_json if audit is not None and isinstance(audit.metadata_json, dict) else {}
     profile = metadata.get("historical_found") if isinstance(metadata, dict) else None
     if not isinstance(profile, dict) or profile.get("available") is not True:
-        return {
-            "available": False,
-            "total_bg_row_count": None,
-            "found_evidence_row_count": None,
-            "found_reported_unit_count": None,
-            "returned_bg_row_count": None,
-            "uniquely_linked_bg_row_count": None,
-            "ambiguous_link_row_count": None,
-            "unlinked_found_row_count": None,
-        }
+        return _historical_found_unavailable("not_available")
+
+    total_bg_rows = profile.get("total_bg_row_count")
+    returned_bg_rows = profile.get("returned_bg_row_count")
+    if (
+        isinstance(total_bg_rows, bool)
+        or not isinstance(total_bg_rows, int)
+        or total_bg_rows < 0
+        or isinstance(returned_bg_rows, bool)
+        or not isinstance(returned_bg_rows, int)
+        or returned_bg_rows < 0
+        or returned_bg_rows > total_bg_rows
+    ):
+        return _historical_found_unavailable("inconsistent_counts")
+
     counts = db.execute(
         select(
             func.count(HistoricalFoundEvidenceProjection.id).label("found_rows"),
@@ -296,14 +316,26 @@ def _historical_found_summary(db: Session, audit: ImportBatch | None) -> dict[st
         )
         .where(HistoricalFoundEvidenceProjection.import_batch_id == audit.id)
     ).one()
-    total_bg_rows = profile.get("total_bg_row_count")
-    returned_bg_rows = profile.get("returned_bg_row_count")
+    found_evidence_rows = int(counts.found_rows)
+    if found_evidence_rows > total_bg_rows:
+        return _historical_found_unavailable("inconsistent_counts")
+
+    pending_to_survey = total_bg_rows - found_evidence_rows
+    coverage_percent = None if total_bg_rows == 0 else round((found_evidence_rows / total_bg_rows) * 100, 2)
     return {
         "available": True,
-        "total_bg_row_count": total_bg_rows if isinstance(total_bg_rows, int) else 0,
-        "found_evidence_row_count": int(counts.found_rows),
+        "reason": None,
+        "primary_metrics": {
+            "total_bg_count": total_bg_rows,
+            "found_in_cost_center_count": found_evidence_rows,
+            "returned_count": returned_bg_rows,
+            "pending_to_survey_count": pending_to_survey,
+            "found_coverage_percent": coverage_percent,
+        },
+        "total_bg_row_count": total_bg_rows,
+        "found_evidence_row_count": found_evidence_rows,
         "found_reported_unit_count": int(counts.reported_units),
-        "returned_bg_row_count": returned_bg_rows if isinstance(returned_bg_rows, int) else 0,
+        "returned_bg_row_count": returned_bg_rows,
         "uniquely_linked_bg_row_count": int(counts.linked_bg_rows),
         "ambiguous_link_row_count": int(counts.ambiguous_rows),
         "unlinked_found_row_count": int(counts.unlinked_rows),

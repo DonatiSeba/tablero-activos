@@ -36,8 +36,17 @@ type TimeEvolution = {
   points: { report_date: string; system_count: number; found_in_cost_center_count: number; audit_snapshot_difference_count: number }[];
   return_evolution: { available: boolean; reason?: string | null; points: unknown[] };
 };
+type HistoricalPrimaryMetrics = {
+  total_bg_count: number;
+  found_in_cost_center_count: number;
+  returned_count: number;
+  pending_to_survey_count: number;
+  found_coverage_percent: number | null;
+};
 type HistoricalFound = {
   available: boolean;
+  reason?: "not_available" | "inconsistent_counts" | null;
+  primary_metrics: HistoricalPrimaryMetrics | null;
   total_bg_row_count: number | null;
   found_evidence_row_count: number | null;
   found_reported_unit_count: number | null;
@@ -192,7 +201,27 @@ const metricIcons = { blue: "▤", green: "✓", cyan: "↩", red: "!", yellow: 
 function Metric({ label, value, tone = "blue", description }: { label: string; value: number | null; tone?: keyof typeof metricIcons; description?: string }) {
   return <div className={`metric metric-${tone}`}><div className="metric-top"><dt>{label}</dt><span className="metric-icon" aria-hidden="true">{metricIcons[tone]}</span></div><dd>{number(value)}</dd>{description && <span className="metric-description">{description}</span>}<span className="metric-accent" aria-hidden="true" /></div>;
 }
-function Kpis({ metrics }: { metrics: ExecutiveMetrics }) {
+function Kpis({ metrics, historicalFound }: { metrics: ExecutiveMetrics; historicalFound: HistoricalFound | undefined }) {
+  const historical = historicalFound?.primary_metrics;
+  if (historicalFound?.available && historical) {
+    return <><dl className="metrics executive-metrics">
+      <Metric label="Total BG" value={historical.total_bg_count} />
+      <Metric label="Encontrados en CC" value={historical.found_in_cost_center_count} tone="green" />
+      <Metric label="Retornados" value={historical.returned_count} tone="cyan" />
+      <Metric label="Pendientes de relevar" value={historical.pending_to_survey_count} tone="red" />
+    </dl><dl className="supporting-metrics" aria-label="Indicadores complementarios"><div><dt>Filas manuales relevadas</dt><dd>{number(historical.found_in_cost_center_count)}</dd></div><div><dt>Cobertura de relevamiento</dt><dd>{percentage(historical.found_coverage_percent)}</dd></div></dl></>;
+  }
+  if (historicalFound?.available || historicalFound?.reason === "inconsistent_counts") {
+    const unavailableMessage = historicalFound?.reason === "inconsistent_counts"
+      ? "Los conteos históricos no son consistentes; los indicadores físicos no están disponibles."
+      : "Los indicadores físicos históricos no están disponibles.";
+    return <><dl className="metrics executive-metrics">
+      <Metric label="Total BG" value={null} />
+      <Metric label="Encontrados en CC" value={null} tone="green" />
+      <Metric label="Retornados" value={null} tone="cyan" />
+      <Metric label="Pendientes de relevar" value={null} tone="red" />
+    </dl><p className="notice warning" role="status">{unavailableMessage}</p></>;
+  }
   return <><dl className="metrics executive-metrics">
     <Metric label="En sistema" value={metrics.system_count} />
     <Metric label="Encontrados en CC" value={metrics.found_in_cost_center_count} tone="green" />
@@ -203,17 +232,14 @@ function Kpis({ metrics }: { metrics: ExecutiveMetrics }) {
 function HistoricalFoundPanel({ metrics }: { metrics: HistoricalFound | undefined }) {
   if (!metrics?.available) return null;
   return <section className="panel historical-found-panel" aria-labelledby="historical-found-heading">
-    <div className="panel-heading"><div><h2 id="historical-found-heading">Evidencia histórica de relevamiento</h2><p>Conteos del libro histórico; no modifican los indicadores ni los gráficos del estado actual.</p></div><span className="chip">Evidencia suplementaria</span></div>
+    <div className="panel-heading"><div><h2 id="historical-found-heading">Evidencia histórica de relevamiento</h2><p>Los indicadores principales muestran el relevamiento físico; estos conteos describen la calidad de sus vínculos.</p></div><span className="chip">Evidencia suplementaria</span></div>
     <dl className="metrics historical-found-metrics">
-      <Metric label="Total BG" value={metrics.total_bg_row_count} description="Filas BG" />
-      <Metric label="Encontrados en relevamiento" value={metrics.found_evidence_row_count} tone="green" description="Filas manuales no vacías" />
-      <Metric label="Devueltos" value={metrics.returned_bg_row_count} tone="cyan" description="Filas BG azules" />
       <Metric label="Vinculados a BG" value={metrics.uniquely_linked_bg_row_count} description="Vínculos únicos conservadores" />
       <Metric label="Evidencia manual ambigua" value={metrics.ambiguous_link_row_count} tone="yellow" description="Filas manuales" />
       <Metric label="Evidencia manual sin vínculo" value={metrics.unlinked_found_row_count} tone="red" description="Filas manuales" />
     </dl>
     <p className="historical-found-units"><strong>Unidades manuales informadas:</strong> {number(metrics.found_reported_unit_count)}. Son evidencia suplementaria y no representan activos distintos.</p>
-    <p className="notice historical-found-overlap" role="note"><strong>Importante:</strong> los hallados y los devueltos pueden superponerse históricamente; no se suman entre sí.</p>
+    <p className="notice historical-found-overlap" role="note"><strong>Importante:</strong> los hallados y los devueltos pueden superponerse históricamente; los pendientes se calculan solo como Total BG menos filas manuales relevadas.</p>
   </section>;
 }
 function Donut({ chart }: { chart: DonutChart }) {
@@ -468,7 +494,7 @@ function Dashboard() {
     {data && <ServerPagination page={data.page} busy={summaryLoading} label="Paginación de centros de costo" onNavigate={(offset, limit) => void loadSummaryPage({ offset, limit })} />}
     {selected && <>
       <section className="context-card" aria-label="Contexto del centro de costo"><div><span>Centro seleccionado</span><strong>CC {selected.cost_center.code} · {selected.cost_center.name}</strong></div><SourceDates system={selected.latest_sources.system} audit={selected.latest_sources.audit} freshness={selected.freshness} /></section>
-      <Kpis metrics={selected.executive_metrics} />
+      <Kpis metrics={selected.executive_metrics} historicalFound={selected.historical_found} />
       <HistoricalFoundPanel metrics={selected.historical_found} />
       <ErrorNotice error={drilldownError} />
       {!drilldown && !drilldownError && <div className="loading-card" role="status">Cargando conciliación agrupada…</div>}

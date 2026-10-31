@@ -16,6 +16,14 @@ const executiveMetrics = { system_count: 4, found_in_cost_center_count: 2, retur
 const operationalIssues = { physical_patrimonial_difference_count: 1, system_update_required_return_count: 1, system_data_quality_omission_count: 0, review_required_count: 0, unresolved_audit_case_count: 1, not_in_management_system_for_cost_center_count: 2 };
 type HistoricalFoundFixture = {
   available: boolean;
+  reason?: "not_available" | "inconsistent_counts" | null;
+  primary_metrics: {
+    total_bg_count: number;
+    found_in_cost_center_count: number;
+    returned_count: number;
+    pending_to_survey_count: number;
+    found_coverage_percent: number | null;
+  } | null;
   total_bg_row_count: number | null;
   found_evidence_row_count: number | null;
   found_reported_unit_count: number | null;
@@ -26,6 +34,8 @@ type HistoricalFoundFixture = {
 };
 const unavailableHistoricalFound: HistoricalFoundFixture = {
   available: false,
+  reason: "not_available",
+  primary_metrics: null,
   total_bg_row_count: null,
   found_evidence_row_count: null,
   found_reported_unit_count: null,
@@ -321,7 +331,10 @@ describe("sesión y vistas de presentación", () => {
     installFetch(); render(<App />);
     expect(await screen.findByText("Las fechas de sistema y auditoría no coinciden; no representan un corte común.")).toBeInTheDocument();
     expect(screen.queryByText("ignored server text")).not.toBeInTheDocument();
-    expect(screen.getAllByText("4").length).toBeGreaterThan(0);
+    expect(screen.getByText("En sistema").closest(".metric")).toHaveTextContent("4");
+    expect(screen.getByText("Diferencia pendiente").closest(".metric")).toHaveTextContent("1");
+    expect(screen.getByText("Contabilizados").parentElement).toHaveTextContent("3");
+    expect(screen.getByText("Cobertura").parentElement).toHaveTextContent("75 %");
     expect(screen.getByRole("img", { name: "Distribución general de conciliación" })).toBeInTheDocument();
     expect(screen.getByText("2026-09-17")).toBeInTheDocument(); expect(screen.getByText("2026-09-16")).toBeInTheDocument();
   });
@@ -330,20 +343,33 @@ describe("sesión y vistas de presentación", () => {
     const historicalSummary = structuredClone(summary);
     historicalSummary.summaries[0].historical_found = {
       available: true,
-      total_bg_row_count: 8,
-      found_evidence_row_count: 5,
+      reason: null,
+      primary_metrics: {
+        total_bg_count: 831,
+        found_in_cost_center_count: 763,
+        returned_count: 331,
+        pending_to_survey_count: 68,
+        found_coverage_percent: 91.82,
+      },
+      total_bg_row_count: 831,
+      found_evidence_row_count: 763,
       found_reported_unit_count: 11,
-      returned_bg_row_count: 2,
+      returned_bg_row_count: 331,
       uniquely_linked_bg_row_count: 3,
       ambiguous_link_row_count: 1,
       unlinked_found_row_count: 1,
     };
     installFetch(viewer, { summaries: historicalSummary }); render(<App />);
 
-    const panel = (await screen.findByRole("heading", { name: "Evidencia histórica de relevamiento" })).closest("section")!;
-    expect(within(panel).getByText("Total BG").closest(".metric")).toHaveTextContent("8");
-    expect(within(panel).getByText("Encontrados en relevamiento").closest(".metric")).toHaveTextContent("5");
-    expect(within(panel).getByText("Devueltos").closest(".metric")).toHaveTextContent("2");
+    expect((await screen.findByText("Total BG")).closest(".metric")).toHaveTextContent("831");
+    expect(screen.getByText("Encontrados en CC").closest(".metric")).toHaveTextContent("763");
+    expect(screen.getByText("Retornados").closest(".metric")).toHaveTextContent("331");
+    expect(screen.getByText("Pendientes de relevar").closest(".metric")).toHaveTextContent("68");
+    expect(screen.getByText("Filas manuales relevadas").parentElement).toHaveTextContent("763");
+    expect(screen.getByText("Cobertura de relevamiento").parentElement).toHaveTextContent("91,82 %");
+    expect(screen.queryByText("Contabilizados")).not.toBeInTheDocument();
+
+    const panel = screen.getByRole("heading", { name: "Evidencia histórica de relevamiento" }).closest("section")!;
     expect(within(panel).getByText("Vinculados a BG").closest(".metric")).toHaveTextContent("3");
     expect(within(panel).getByText("Evidencia manual ambigua").closest(".metric")).toHaveTextContent("1");
     expect(within(panel).getByText("Evidencia manual sin vínculo").closest(".metric")).toHaveTextContent("1");
@@ -363,6 +389,14 @@ describe("sesión y vistas de presentación", () => {
     const historicalSummary = structuredClone(summary);
     historicalSummary.summaries[0].historical_found = {
       available: true,
+      reason: null,
+      primary_metrics: {
+        total_bg_count: 3,
+        found_in_cost_center_count: 2,
+        returned_count: 2,
+        pending_to_survey_count: 1,
+        found_coverage_percent: 66.67,
+      },
       total_bg_row_count: 3,
       found_evidence_row_count: 2,
       found_reported_unit_count: 2,
@@ -373,7 +407,17 @@ describe("sesión y vistas de presentación", () => {
     };
     installFetch(viewer, { summaries: historicalSummary }); render(<App />);
 
-    expect(await screen.findByText("los hallados y los devueltos pueden superponerse históricamente; no se suman entre sí.")).toBeInTheDocument();
+    expect(await screen.findByText("los hallados y los devueltos pueden superponerse históricamente; los pendientes se calculan solo como Total BG menos filas manuales relevadas.")).toBeInTheDocument();
+  });
+
+  it("muestra métricas físicas no disponibles cuando el servidor informa conteos históricos inconsistentes", async () => {
+    const inconsistentSummary = structuredClone(summary);
+    inconsistentSummary.summaries[0].historical_found = { ...unavailableHistoricalFound, reason: "inconsistent_counts" };
+    installFetch(viewer, { summaries: inconsistentSummary }); render(<App />);
+
+    expect(await screen.findByText("Los conteos históricos no son consistentes; los indicadores físicos no están disponibles.")).toBeInTheDocument();
+    expect(screen.getByText("Total BG").closest(".metric")).toHaveTextContent("No disponible");
+    expect(screen.queryByText("En sistema")).not.toBeInTheDocument();
   });
 
   it("localiza los valores de presentación del servidor sin exponer sus enums", async () => {

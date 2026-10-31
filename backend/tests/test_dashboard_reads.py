@@ -192,6 +192,8 @@ def test_dashboard_contracts_aggregate_server_data_and_redact_evidence(database:
     }
     assert summary["historical_found"] == {
         "available": False,
+        "reason": "not_available",
+        "primary_metrics": None,
         "total_bg_row_count": None,
         "found_evidence_row_count": None,
         "found_reported_unit_count": None,
@@ -338,6 +340,14 @@ def test_dashboard_reports_historical_found_evidence_without_deriving_current_st
     summary = response.json()["summaries"][0]
     assert summary["historical_found"] == {
         "available": True,
+        "reason": None,
+        "primary_metrics": {
+            "total_bg_count": 5,
+            "found_in_cost_center_count": 5,
+            "returned_count": 1,
+            "pending_to_survey_count": 0,
+            "found_coverage_percent": 100.0,
+        },
         "total_bg_row_count": 5,
         "found_evidence_row_count": 5,
         "found_reported_unit_count": 11,
@@ -349,6 +359,45 @@ def test_dashboard_reports_historical_found_evidence_without_deriving_current_st
     assert summary["metrics"]["found_count"] == 0
     assert summary["metrics"]["returned_count"] == 1
     assert summary["metrics"]["pending_not_accounted_count"] == 1
+
+
+def test_dashboard_marks_inconsistent_historical_counts_unavailable(database: sessionmaker[Session]) -> None:
+    populate(database)
+    with database() as db:
+        center = db.scalar(select(CostCenter).where(CostCenter.code == "190"))
+        assert center is not None
+        audit = _batch(
+            db,
+            center,
+            ImportSource.AUDIT,
+            date(2026, 7, 1),
+            100,
+            {"historical_found": {"available": True, "total_bg_row_count": 1, "returned_bg_row_count": 2}},
+        )
+        db.commit()
+
+    async def exercise() -> httpx.Response:
+        api = await client()
+        try:
+            assert (await api.post("/api/auth/login", json={"username": "viewer", "password": "password"})).status_code == 200
+            return await api.get("/api/dashboard/summaries?cost_center_code=190")
+        finally:
+            await api.aclose()
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 200
+    assert response.json()["summaries"][0]["historical_found"] == {
+        "available": False,
+        "reason": "inconsistent_counts",
+        "primary_metrics": None,
+        "total_bg_row_count": None,
+        "found_evidence_row_count": None,
+        "found_reported_unit_count": None,
+        "returned_bg_row_count": None,
+        "uniquely_linked_bg_row_count": None,
+        "ambiguous_link_row_count": None,
+        "unlinked_found_row_count": None,
+    }
 
 
 def test_dashboard_counts_selected_system_omissions_without_other_cost_center_disclosure(database: sessionmaker[Session]) -> None:
