@@ -229,19 +229,6 @@ function Kpis({ metrics, historicalFound }: { metrics: ExecutiveMetrics; histori
     <Metric label="Diferencia pendiente" value={metrics.difference_count} tone="red" />
   </dl><dl className="supporting-metrics" aria-label="Indicadores complementarios"><div><dt>Contabilizados</dt><dd>{number(metrics.accounted_count)}</dd></div><div><dt>Cobertura</dt><dd>{percentage(metrics.coverage_percent)}</dd></div></dl></>;
 }
-function HistoricalFoundPanel({ metrics }: { metrics: HistoricalFound | undefined }) {
-  if (!metrics?.available) return null;
-  return <section className="panel historical-found-panel" aria-labelledby="historical-found-heading">
-    <div className="panel-heading"><div><h2 id="historical-found-heading">Evidencia histórica de relevamiento</h2><p>Los indicadores principales muestran el relevamiento físico; estos conteos describen la calidad de sus vínculos.</p></div><span className="chip">Evidencia suplementaria</span></div>
-    <dl className="metrics historical-found-metrics">
-      <Metric label="Vinculados a BG" value={metrics.uniquely_linked_bg_row_count} description="Vínculos únicos conservadores" />
-      <Metric label="Evidencia manual ambigua" value={metrics.ambiguous_link_row_count} tone="yellow" description="Filas manuales" />
-      <Metric label="Evidencia manual sin vínculo" value={metrics.unlinked_found_row_count} tone="red" description="Filas manuales" />
-    </dl>
-    <p className="historical-found-units"><strong>Unidades manuales informadas:</strong> {number(metrics.found_reported_unit_count)}. Son evidencia suplementaria y no representan activos distintos.</p>
-    <p className="notice historical-found-overlap" role="note"><strong>Importante:</strong> los hallados y los devueltos pueden superponerse históricamente; los pendientes se calculan solo como Total BG menos filas manuales relevadas.</p>
-  </section>;
-}
 function Donut({ chart }: { chart: DonutChart }) {
   if (!chart.available) return <Empty>{chartReason(chart.reason)}</Empty>;
   const colors: Record<string, string> = { found_in_cost_center: "#17855f", returned: "#168aad", difference: "#c74545" };
@@ -333,15 +320,6 @@ function SourceDates({ system, audit, freshness }: { system: Source; audit: Sour
     {freshness.warning && <p className="notice warning" role="status"><strong>Advertencia de vigencia:</strong> {freshnessText(freshness)}</p>}
   </>;
 }
-function OperationalIssues({ issues }: { issues: OperationalIssues }) {
-  return <section className="panel issues" aria-labelledby="issues-heading"><div className="panel-heading"><div><h2 id="issues-heading">Inconsistencias operativas</h2></div><span className="chip chip-warning">Revisión</span></div><div className="issue-grid">
-    <Metric label="Diferencia física o patrimonial" value={issues.physical_patrimonial_difference_count} tone="red" />
-    <Metric label="Retornos pendientes de actualización" value={issues.system_update_required_return_count} tone="cyan" />
-    <Metric label="Casos pendientes de revisión" value={issues.review_required_count} tone="yellow" />
-    <Metric label="No figuran en el sistema de gestión para este CC" value={issues.not_in_management_system_for_cost_center_count} tone="yellow" />
-  </div></section>;
-}
-
 function ServerPagination({ page, busy, label, onNavigate }: { page: Page; busy: boolean; label: string; onNavigate: (offset: number, limit: number) => void }) {
   const pageNumber = Math.floor(page.offset / page.limit) + 1;
   const pageCount = Math.max(1, Math.ceil(page.total_count / page.limit));
@@ -357,16 +335,20 @@ function Dashboard() {
   const [data, setData] = useState<SummariesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
-  const summaryRequestInFlight = useRef(false);
+  const [summaryPageRequest, setSummaryPageRequest] = useState<{ offset: number; limit: number } | null>(null);
+  const summaryRequestVersion = useRef(0);
+  const [refreshVersion, setRefreshVersion] = useState(0);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const selectedCodeRef = useRef<string | null>(null);
   const [drilldown, setDrilldown] = useState<DrilldownResponse | null>(null);
   const [drilldownError, setDrilldownError] = useState<string | null>(null);
   const [drilldownLoading, setDrilldownLoading] = useState(false);
   const [drilldownRequest, setDrilldownRequest] = useState<{ offset: number; limit: number } | null>(null);
+  const drilldownRequestVersion = useRef(0);
   const [rubroChart, setRubroChart] = useState<RubroReconciliationResponse | null>(null);
   const [rubroChartError, setRubroChartError] = useState<string | null>(null);
   const [rubroChartLoading, setRubroChartLoading] = useState(false);
+  const rubroChartRequestVersion = useRef(0);
   const [requestedRubro, setRequestedRubro] = useState<string | null | undefined>(undefined);
   const [requestedCategory, setRequestedCategory] = useState<string | null | undefined>(undefined);
   const [productPageRequest, setProductPageRequest] = useState<ProductPageRequest | null>(null);
@@ -374,6 +356,8 @@ function Dashboard() {
   const rollbackRubroChartRequest = useRef<RubroChartRequestIdentity | null>(null);
 
   function selectCenter(code: string | null) {
+    drilldownRequestVersion.current += 1;
+    rubroChartRequestVersion.current += 1;
     selectedCodeRef.current = code;
     setSelectedCode(code);
     setDrilldownRequest(null);
@@ -389,6 +373,7 @@ function Dashboard() {
   }
 
   function selectRubro(value: string) {
+    rubroChartRequestVersion.current += 1;
     setRequestedRubro(value || null);
     setRequestedCategory(undefined);
     setProductPageRequest(null);
@@ -396,53 +381,67 @@ function Dashboard() {
   }
 
   function selectCategory(value: string) {
+    rubroChartRequestVersion.current += 1;
     setRequestedCategory(value || null);
     setProductPageRequest(null);
     setRubroChartError(null);
   }
 
-  async function loadSummaryPage(page?: { offset: number; limit: number }) {
-    if (summaryRequestInFlight.current) return;
-    summaryRequestInFlight.current = true;
+  async function loadSummaryPage(page?: { offset: number; limit: number }, preserveSelectedCenter = false) {
+    const requestVersion = ++summaryRequestVersion.current;
     setSummaryLoading(true);
     setError(null);
     const path = page ? `/dashboard/summaries?limit=${page.limit}&offset=${page.offset}` : "/dashboard/summaries";
     try {
       const response = await request<SummariesResponse>(path);
+      if (requestVersion !== summaryRequestVersion.current) return;
       const current = selectedCodeRef.current;
-      const next = response.summaries.some((summary) => summary.cost_center.code === current)
+      const next = preserveSelectedCenter
         ? current
-        : response.summaries[0]?.cost_center.code || null;
+        : response.summaries.some((summary) => summary.cost_center.code === current)
+          ? current
+          : response.summaries[0]?.cost_center.code || null;
       setData(response);
       if (next !== current) selectCenter(next);
     } catch (e) {
-      setError(publicError(e as ApiError));
+      if (requestVersion === summaryRequestVersion.current) setError(publicError(e as ApiError));
     } finally {
-      summaryRequestInFlight.current = false;
-      setSummaryLoading(false);
+      if (requestVersion === summaryRequestVersion.current) setSummaryLoading(false);
     }
   }
 
-  useEffect(() => { void loadSummaryPage(); }, []);
+  function refreshDashboard() {
+    drilldownRequestVersion.current += 1;
+    rubroChartRequestVersion.current += 1;
+    setRefreshVersion((version) => version + 1);
+    void loadSummaryPage(summaryPageRequest || undefined, true);
+  }
+
+  useEffect(() => {
+    void loadSummaryPage();
+    return () => { summaryRequestVersion.current += 1; };
+  }, []);
   useEffect(() => {
     if (!selectedCode) return;
     let active = true;
+    const requestVersion = ++drilldownRequestVersion.current;
     setDrilldownLoading(true);
     setDrilldown(null);
     setDrilldownError(null);
     const pagination = drilldownRequest ? `&limit=${drilldownRequest.limit}&offset=${drilldownRequest.offset}` : "";
     request<DrilldownResponse>(`/dashboard/system-drilldown?cost_center_code=${encodeURIComponent(selectedCode)}${pagination}`).then((response) => {
-      if (active) setDrilldown(response);
+      if (active && requestVersion === drilldownRequestVersion.current) setDrilldown(response);
     }).catch((e: ApiError) => {
-      if (active) setDrilldownError(publicError(e));
+      if (active && requestVersion === drilldownRequestVersion.current) setDrilldownError(publicError(e));
     }).finally(() => {
-      if (active) setDrilldownLoading(false);
+      if (active && requestVersion === drilldownRequestVersion.current) setDrilldownLoading(false);
     });
     return () => { active = false; };
-  }, [selectedCode, drilldownRequest]);
+  }, [selectedCode, drilldownRequest, refreshVersion]);
 
   useEffect(() => {
     if (!selectedCode) return;
+    const requestVersion = ++rubroChartRequestVersion.current;
     const currentRequest = { costCenterCode: selectedCode, rubro: requestedRubro, category: requestedCategory, productPage: productPageRequest };
     const rollbackRequest = rollbackRubroChartRequest.current;
     if (rollbackRequest) {
@@ -456,12 +455,12 @@ function Dashboard() {
     const category = requestedCategory === undefined ? "" : `&category=${encodeURIComponent(requestedCategory ?? "")}`;
     const productPage = productPageRequest ? `&product_limit=${productPageRequest.limit}&product_offset=${productPageRequest.offset}` : "";
     request<RubroReconciliationResponse>(`/dashboard/rubro-reconciliation-chart?cost_center_code=${encodeURIComponent(selectedCode)}${rubro}${category}${productPage}`).then((response) => {
-      if (active) {
+      if (active && requestVersion === rubroChartRequestVersion.current) {
         lastSuccessfulRubroRequest.current = currentRequest;
         setRubroChart(response);
       }
     }).catch((e: ApiError) => {
-      if (!active) return;
+      if (!active || requestVersion !== rubroChartRequestVersion.current) return;
       setRubroChartLoading(false);
       setRubroChartError(publicError(e));
       const previousRequest = lastSuccessfulRubroRequest.current;
@@ -472,10 +471,16 @@ function Dashboard() {
         setProductPageRequest(previousRequest.productPage);
       }
     }).finally(() => {
-      if (active) setRubroChartLoading(false);
+      if (active && requestVersion === rubroChartRequestVersion.current) setRubroChartLoading(false);
     });
     return () => { active = false; };
-  }, [selectedCode, requestedRubro, requestedCategory, productPageRequest]);
+  }, [selectedCode, requestedRubro, requestedCategory, productPageRequest, refreshVersion]);
+
+  function navigateSummaryPage(offset: number, limit: number) {
+    const page = { offset, limit };
+    setSummaryPageRequest(page);
+    void loadSummaryPage(page);
+  }
 
   function navigateDrilldown(offset: number, limit: number) {
     if (drilldownLoading) return;
@@ -487,19 +492,18 @@ function Dashboard() {
 
   const selected = data?.summaries.find((summary) => summary.cost_center.code === selectedCode) || null;
   return <section aria-labelledby="dashboard-heading">
-    <div className="dashboard-topbar"><div className="title-wrap"><h1 id="dashboard-heading">Conciliación de activos</h1></div>{data && data.summaries.length > 0 && <label className="cost-center-select">Centro de costo<select value={selectedCode || ""} disabled={summaryLoading} onChange={(event) => selectCenter(event.target.value)}>{data.summaries.map((summary) => <option value={summary.cost_center.code} key={summary.cost_center.code}>CC {summary.cost_center.code} · {summary.cost_center.name}</option>)}</select></label>}</div>
+    <div className="dashboard-topbar"><div className="title-wrap"><h1 id="dashboard-heading">Conciliación de activos</h1></div><div className="dashboard-actions"><button type="button" className="button-secondary" onClick={refreshDashboard} aria-label="Actualizar datos del dashboard">{summaryLoading ? "Actualizando…" : "Actualizar datos"}</button>{data && data.summaries.length > 0 && <label className="cost-center-select">Centro de costo<select value={selectedCode || ""} disabled={summaryLoading} onChange={(event) => selectCenter(event.target.value)}>{data.summaries.map((summary) => <option value={summary.cost_center.code} key={summary.cost_center.code}>CC {summary.cost_center.code} · {summary.cost_center.name}</option>)}</select></label>}</div></div>
     <ErrorNotice error={error} />
     {!data && !error && <div className="loading-card" role="status">Cargando resumen ejecutivo…</div>}
     {data?.summaries.length === 0 && <Empty>No hay centros de costo disponibles para esta sesión.</Empty>}
-    {data && <ServerPagination page={data.page} busy={summaryLoading} label="Paginación de centros de costo" onNavigate={(offset, limit) => void loadSummaryPage({ offset, limit })} />}
+    {data && <ServerPagination page={data.page} busy={summaryLoading} label="Paginación de centros de costo" onNavigate={navigateSummaryPage} />}
     {selected && <>
       <section className="context-card" aria-label="Contexto del centro de costo"><div><span>Centro seleccionado</span><strong>CC {selected.cost_center.code} · {selected.cost_center.name}</strong></div><SourceDates system={selected.latest_sources.system} audit={selected.latest_sources.audit} freshness={selected.freshness} /></section>
       <Kpis metrics={selected.executive_metrics} historicalFound={selected.historical_found} />
-      <HistoricalFoundPanel metrics={selected.historical_found} />
       <ErrorNotice error={drilldownError} />
       {!drilldown && !drilldownError && <div className="loading-card" role="status">Cargando conciliación agrupada…</div>}
       <div className="dashboard-grid dashboard-grid-primary"><section className="panel chart-panel"><div className="panel-heading"><div><h2>Conciliación por rubro</h2></div><span className="chip">Último corte</span></div>{drilldown ? <><StackedBars chart={drilldown.charts.primary_stacked_bar} /><ServerPagination page={drilldown.page} busy={drilldownLoading} label="Paginación del gráfico principal de conciliación" onNavigate={navigateDrilldown} /></> : <div className="chart-placeholder" />}</section><section className="panel chart-panel"><div className="panel-heading"><div><h2>Estado general</h2></div><span className="chip">{percentage(selected.executive_metrics.coverage_percent)} cobertura</span></div><Donut chart={drilldown?.charts.general_status_donut || selected.charts.general_status_donut} /></section></div>
-      <div className="dashboard-grid">{selected.charts.time_evolution.available && <section className="panel chart-panel"><div className="panel-heading"><div><h2>Evolución temporal</h2></div><span className="chip">Histórico</span></div><Evolution chart={selected.charts.time_evolution} /></section>}<OperationalIssues issues={drilldown?.operational_issues || selected.operational_issues} /></div>
+      <div className="dashboard-grid">{selected.charts.time_evolution.available && <section className="panel chart-panel"><div className="panel-heading"><div><h2>Evolución temporal</h2></div><span className="chip">Histórico</span></div><Evolution chart={selected.charts.time_evolution} /></section>}</div>
       <section className="panel rubro-chart-panel" aria-labelledby="rubro-chart-heading" aria-busy={rubroChartLoading}><div className="panel-heading"><div><h2 id="rubro-chart-heading">Detalle de conciliación</h2></div><span className="chip" role="status" aria-live="polite">{rubroChartLoading && rubroChart ? "Actualizando…" : "Por producto"}</span></div>{!rubroChart && rubroChartLoading && <div className="loading-card" role="status">Cargando productos de la categoría…</div>}<ErrorNotice error={rubroChartError} />{rubroChart && <>{rubroChart.rubro_options.length === 0 ? <Empty>No hay rubros disponibles para este centro de costo.</Empty> : <div className="hierarchy-selectors"><label>Rubro<select value={rubroChart.selected_rubro?.value ?? ""} disabled={rubroChartLoading} onChange={(event) => selectRubro(event.target.value)}>{rubroChart.rubro_options.map((option) => <option key={option.value ?? "unassigned"} value={option.value ?? ""}>{option.label}</option>)}</select></label><label>Categoría<select value={rubroChart.selected_category?.value ?? ""} disabled={rubroChartLoading || rubroChart.category_options.length === 0} onChange={(event) => selectCategory(event.target.value)}>{rubroChart.category_options.map((option) => <option key={option.value ?? "unassigned"} value={option.value ?? ""}>{option.label}</option>)}</select></label></div>}<ProductBars chart={rubroChart.product_chart} />{rubroChart.product_chart.available && <ServerPagination page={rubroChart.product_chart.page} busy={rubroChartLoading} label="Paginación de productos de conciliación" onNavigate={(offset, limit) => setProductPageRequest({ offset, limit })} />}</>}</section>
     </>}
   </section>;

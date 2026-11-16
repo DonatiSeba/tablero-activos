@@ -72,6 +72,8 @@ button:hover { transform: translateY(-1px); }
 .mobile-header, .nav-scrim { display: none; }
 
 .dashboard-topbar { display: flex; align-items: center; justify-content: space-between; gap: 1.25rem; margin-bottom: 22px; }
+.dashboard-actions { display: flex; align-items: end; gap: .75rem; }
+.dashboard-actions .button-secondary { min-width: max-content; }
 .title-wrap .eyebrow { margin-bottom: .35rem; }
 .title-wrap p:last-child { margin: 5px 0 0; color: var(--muted); font-size: .8rem; }
 .eyebrow, .card-overline { margin: 0 0 .45rem; color: var(--blue); font-size: .67rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
@@ -104,13 +106,6 @@ dd { margin: .15rem 0 0; color: var(--text); font-weight: 800; }
 .supporting-metrics div { display: flex; align-items: baseline; gap: 7px; border: 1px solid var(--line); border-radius: 999px; padding: 6px 11px; background: rgb(255 255 255 / 75%); }
 .supporting-metrics dd { font-size: .78rem; }
 
-.historical-found-panel { margin: 0 0 18px; overflow: hidden; }
-.historical-found-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 4px 18px 12px; }
-.historical-found-metrics .metric { min-height: 108px; border-radius: 14px; padding: 12px; box-shadow: none; }
-.historical-found-metrics .metric dd { margin: 7px 0 0; font-size: 1.35rem; }
-.historical-found-units { margin: 0 18px 12px; color: #526a80; font-size: .76rem; }
-.historical-found-overlap { margin: 0 18px 18px; }
-
 .panel { border: 1px solid #edf1f6; border-radius: var(--radius); background: #fff; box-shadow: var(--shadow); }
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 18px; }
 .dashboard-grid-primary { grid-template-columns: minmax(0, 1.65fr) minmax(19rem, 1fr); }
@@ -119,17 +114,9 @@ dd { margin: .15rem 0 0; color: var(--text); font-weight: 800; }
 .panel-heading h2 { font-size: .88rem; }
 .panel-heading p { margin: 4px 0 0; color: var(--muted); font-size: .68rem; }
 .chip { flex: 0 0 auto; border-radius: 999px; padding: 6px 9px; background: #f2f5f9; color: #667185; font-size: .62rem; font-weight: 800; }
-.chip-warning { background: #fff6e5; color: #a56c12; }
 .chart { width: 100%; height: 310px; }
 .chart-placeholder { height: 310px; background: linear-gradient(100deg, #fafbfd 30%, #f3f6fa 50%, #fafbfd 70%); background-size: 300% 100%; animation: shimmer 1.3s infinite; }
 .return-evolution-notice { margin: 0 18px 16px; font-size: .76rem; }
-.issues { min-width: 0; overflow: hidden; }
-.issue-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; padding: 4px 18px 18px; }
-.issue-grid .metric { min-height: 92px; border-radius: 14px; padding: 11px; box-shadow: none; }
-.issue-grid .metric:last-child { grid-column: 1 / -1; }
-.issue-grid .metric dd { margin: 6px 0 0; font-size: 1.2rem; }
-.issue-grid .metric-description { display: none; }
-.issue-grid .metric-icon { width: 27px; height: 27px; flex-basis: 27px; }
 
 .rubro-chart-panel { overflow: hidden; }
 .hierarchy-selectors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 0 18px 14px; }
@@ -197,7 +184,6 @@ tbody tr:hover { background: #f9fbfe; }
 @keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
 @media (max-width: 74rem) {
   .executive-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .historical-found-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dashboard-grid, .dashboard-grid-primary { grid-template-columns: 1fr; }
   .context-card { grid-template-columns: 1fr; }
 }
@@ -211,11 +197,14 @@ tbody tr:hover { background: #f9fbfe; }
   .nav-scrim:hover { transform: none; }
   .content { width: 100%; margin-left: 0; padding: 22px 20px 36px; }
   .dashboard-topbar { align-items: flex-start; flex-direction: column; }
+  .dashboard-actions { width: 100%; align-items: end; }
   .cost-center-select { width: 100%; }
 }
 @media (max-width: 38rem) {
   .content { padding: 20px 12px 32px; }
-  .executive-metrics, .historical-found-metrics { grid-template-columns: 1fr; }
+  .dashboard-actions { align-items: stretch; flex-direction: column-reverse; }
+  .dashboard-actions .button-secondary { width: 100%; }
+  .executive-metrics { grid-template-columns: 1fr; }
   .supporting-metrics { align-items: stretch; flex-direction: column; }
   .supporting-metrics div { justify-content: space-between; }
   .sources, .upload-grid, .user-management-grid, .cost-center-management-grid, .hierarchy-selectors { grid-template-columns: 1fr; }
@@ -224,8 +213,6 @@ tbody tr:hover { background: #f9fbfe; }
   .context-card { min-width: 0; padding: 14px; }
   .chart { height: 280px; }
   .panel-heading { align-items: flex-start; }
-  .issue-grid { grid-template-columns: 1fr; }
-  .issue-grid .metric:last-child { grid-column: auto; }
   .page-heading { flex-direction: column; }
 }
 @media (prefers-reduced-motion: reduce) {

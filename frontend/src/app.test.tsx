@@ -67,7 +67,7 @@ const summary = {
 const drilldown = {
   cost_center: { code: "190", name: "Principal" }, source: summary.summaries[0].latest_sources.system, audit_source: summary.summaries[0].latest_sources.audit,
   executive_metrics: executiveMetrics, operational_issues: operationalIssues,
-  charts: { primary_stacked_bar: { available: true, series: [{ key: "found_in_cost_center_count", label: "found_in_cost_center" }, { key: "returned_count", label: "returned" }, { key: "difference_count", label: "difference" }], items: [{ rubro: null, category: null, ...executiveMetrics }] }, general_status_donut: summary.summaries[0].charts.general_status_donut },
+  charts: { primary_stacked_bar: { available: true, series: [{ key: "found_in_cost_center_count", label: "found_in_cost_center" }, { key: "returned_count", label: "returned" }, { key: "difference_count", label: "difference" }], items: [{ rubro: null as string | null, category: null, ...executiveMetrics }] }, general_status_donut: summary.summaries[0].charts.general_status_donut },
   page: { limit: 100, offset: 0, has_more: false, total_count: 1 },
 };
 type RubroChartFixture = {
@@ -206,6 +206,101 @@ describe("sesión y vistas de presentación", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=191", expect.objectContaining({ credentials: "include" })));
   });
 
+  it("refreshes dashboard data for the selected cost center", async () => {
+    const initialSummaries = structuredClone(summary);
+    initialSummaries.summaries.push({ ...structuredClone(summary.summaries[0]), cost_center: { code: "191", name: "Centro secundario" } });
+    const refreshedSummaries = structuredClone(initialSummaries);
+    refreshedSummaries.summaries[1].executive_metrics = { ...executiveMetrics, system_count: 9, found_in_cost_center_count: 6, difference_count: 3 };
+    const refreshedDrilldown = structuredClone(drilldown);
+    refreshedDrilldown.charts.primary_stacked_bar.items = [{ rubro: "Rubro actualizado", category: null, ...executiveMetrics, found_in_cost_center_count: 6, difference_count: 3 }];
+    const refreshedRubroChart = structuredClone(rubroChart);
+    refreshedRubroChart.product_chart.items = [{ product: "Silla", product_label: "Silla actualizada", found_in_cost_center_count: 6, returned_count: 2, difference_count: 3 }];
+    let refreshed = false;
+    const fetchMock = vi.fn((url: string) => {
+      if (url === "/api/auth/me") return json(viewer);
+      if (url === "/api/dashboard/summaries") return json(refreshed ? refreshedSummaries : initialSummaries);
+      if (url.startsWith("/api/dashboard/system-drilldown")) return json(refreshed ? refreshedDrilldown : drilldown);
+      if (url.startsWith("/api/dashboard/rubro-reconciliation-chart")) return json(refreshed ? refreshedRubroChart : rubroChart);
+      return json({}, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock); render(<App />);
+
+    const centerSelector = await screen.findByLabelText("Centro de costo");
+    fireEvent.change(centerSelector, { target: { value: "191" } });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/system-drilldown?cost_center_code=191", expect.anything()));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/rubro-reconciliation-chart?cost_center_code=191", expect.anything()));
+
+    refreshed = true;
+    fireEvent.click(screen.getByRole("button", { name: "Actualizar datos del dashboard" }));
+
+    expect(centerSelector).toHaveValue("191");
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === "/api/dashboard/summaries")).toHaveLength(2));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === "/api/dashboard/system-drilldown?cost_center_code=191")).toHaveLength(2));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === "/api/dashboard/rubro-reconciliation-chart?cost_center_code=191")).toHaveLength(2));
+    await waitFor(() => expect(screen.getByText("En sistema").closest(".metric")).toHaveTextContent("9"));
+    await waitFor(() => expect(setOptionMock).toHaveBeenCalledWith(expect.objectContaining({ yAxis: expect.objectContaining({ data: ["Rubro actualizado"] }) })));
+    await waitFor(() => expect(setOptionMock).toHaveBeenCalledWith(expect.objectContaining({ yAxis: expect.objectContaining({ data: ["Silla actualizada"] }) })));
+  });
+
+  it("keeps the latest dashboard refresh when earlier requests resolve late", async () => {
+    const staleSummary = structuredClone(summary);
+    staleSummary.summaries[0].executive_metrics = { ...executiveMetrics, system_count: 7 };
+    const newestSummary = structuredClone(summary);
+    newestSummary.summaries[0].executive_metrics = { ...executiveMetrics, system_count: 12 };
+    const staleDrilldown = structuredClone(drilldown);
+    staleDrilldown.charts.primary_stacked_bar.items = [{ rubro: "Rubro obsoleto", category: null, ...executiveMetrics }];
+    const newestDrilldown = structuredClone(drilldown);
+    newestDrilldown.charts.primary_stacked_bar.items = [{ rubro: "Rubro vigente", category: null, ...executiveMetrics }];
+    const staleRubroChart = structuredClone(rubroChart);
+    staleRubroChart.product_chart.items = [{ product: "Obsoleto", product_label: "Producto obsoleto", found_in_cost_center_count: 1, returned_count: 1, difference_count: 1 }];
+    const newestRubroChart = structuredClone(rubroChart);
+    newestRubroChart.product_chart.items = [{ product: "Vigente", product_label: "Producto vigente", found_in_cost_center_count: 12, returned_count: 2, difference_count: 3 }];
+    const staleSummaryRequest = deferredResponse();
+    const staleDrilldownRequest = deferredResponse();
+    const staleRubroChartRequest = deferredResponse();
+    let summaryRequests = 0;
+    let drilldownRequests = 0;
+    let rubroChartRequests = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url === "/api/auth/me") return json(viewer);
+      if (url === "/api/dashboard/summaries") {
+        summaryRequests += 1;
+        return summaryRequests === 1 ? json(summary) : summaryRequests === 2 ? staleSummaryRequest.promise : json(newestSummary);
+      }
+      if (url.startsWith("/api/dashboard/system-drilldown")) {
+        drilldownRequests += 1;
+        return drilldownRequests === 1 ? json(drilldown) : drilldownRequests === 2 ? staleDrilldownRequest.promise : json(newestDrilldown);
+      }
+      if (url.startsWith("/api/dashboard/rubro-reconciliation-chart")) {
+        rubroChartRequests += 1;
+        return rubroChartRequests === 1 ? json(rubroChart) : rubroChartRequests === 2 ? staleRubroChartRequest.promise : json(newestRubroChart);
+      }
+      return json({}, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock); render(<App />);
+
+    await screen.findByRole("img", { name: "Barras agrupadas de conciliación por producto" });
+    const refreshButton = screen.getByRole("button", { name: "Actualizar datos del dashboard" });
+    fireEvent.click(refreshButton);
+    await waitFor(() => expect([summaryRequests, drilldownRequests, rubroChartRequests]).toEqual([2, 2, 2]));
+    fireEvent.click(refreshButton);
+    await waitFor(() => expect(screen.getByText("En sistema").closest(".metric")).toHaveTextContent("12"));
+    await waitFor(() => expect(setOptionMock).toHaveBeenCalledWith(expect.objectContaining({ yAxis: expect.objectContaining({ data: ["Rubro vigente"] }) })));
+    await waitFor(() => expect(setOptionMock).toHaveBeenCalledWith(expect.objectContaining({ yAxis: expect.objectContaining({ data: ["Producto vigente"] }) })));
+    const optionCountAfterNewestRefresh = setOptionMock.mock.calls.length;
+
+    await act(async () => {
+      staleSummaryRequest.resolve(await json(staleSummary));
+      staleDrilldownRequest.resolve(await json(staleDrilldown));
+      staleRubroChartRequest.resolve(await json(staleRubroChart));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("En sistema").closest(".metric")).toHaveTextContent("12");
+    expect(setOptionMock).toHaveBeenCalledTimes(optionCountAfterNewestRefresh);
+    expect(screen.getByLabelText("Centro de costo")).toHaveValue("190");
+  });
+
   it("avanza y regresa entre páginas del servidor de centros de costo", async () => {
     const firstPage = structuredClone(summary);
     firstPage.page = { limit: 1, offset: 0, has_more: true, total_count: 2 };
@@ -244,6 +339,40 @@ describe("sesión y vistas de presentación", () => {
     expect(await screen.findByLabelText("Centro de costo")).toHaveValue("190");
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/summaries?limit=1&offset=0", expect.objectContaining({ credentials: "include" })));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/system-drilldown?cost_center_code=190", expect.objectContaining({ credentials: "include" })));
+  });
+
+  it("refreshes the selected center on the current summary page", async () => {
+    const firstPage = structuredClone(summary);
+    firstPage.page = { limit: 1, offset: 0, has_more: true, total_count: 2 };
+    const secondPage = structuredClone(summary);
+    secondPage.summaries[0].cost_center = { code: "191", name: "Centro secundario" };
+    secondPage.page = { limit: 1, offset: 1, has_more: false, total_count: 2 };
+    const refreshedSecondPage = structuredClone(secondPage);
+    refreshedSecondPage.summaries[0].executive_metrics = { ...executiveMetrics, system_count: 9 };
+    let refreshed = false;
+    const fetchMock = vi.fn((url: string) => {
+      if (url === "/api/auth/me") return json(viewer);
+      if (url === "/api/dashboard/summaries") return json(firstPage);
+      if (url === "/api/dashboard/summaries?limit=1&offset=1") return json(refreshed ? refreshedSecondPage : secondPage);
+      if (url.startsWith("/api/dashboard/system-drilldown")) return json(drilldown);
+      if (url.startsWith("/api/dashboard/rubro-reconciliation-chart")) return json(rubroChart);
+      return json({}, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock); render(<App />);
+
+    const navigation = await screen.findByRole("navigation", { name: "Paginación de centros de costo" });
+    fireEvent.click(within(navigation).getByRole("button", { name: "Siguiente" }));
+    const centerSelector = await screen.findByLabelText("Centro de costo");
+    expect(centerSelector).toHaveValue("191");
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/dashboard/summaries?limit=1&offset=1", expect.anything()));
+
+    refreshed = true;
+    fireEvent.click(screen.getByRole("button", { name: "Actualizar datos del dashboard" }));
+
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url === "/api/dashboard/summaries?limit=1&offset=1")).toHaveLength(2));
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/dashboard/summaries")).toHaveLength(1);
+    await waitFor(() => expect(centerSelector).toHaveValue("191"));
+    await waitFor(() => expect(screen.getByText("En sistema").closest(".metric")).toHaveTextContent("9"));
   });
 
   it("mantiene la paginación del servidor junto al gráfico principal", async () => {
@@ -339,7 +468,7 @@ describe("sesión y vistas de presentación", () => {
     expect(screen.getByText("2026-09-17")).toBeInTheDocument(); expect(screen.getByText("2026-09-16")).toBeInTheDocument();
   });
 
-  it("presenta la evidencia histórica disponible como métricas suplementarias", async () => {
+  it("preserves historical KPI cards without rendering removed payload-backed panels", async () => {
     const historicalSummary = structuredClone(summary);
     historicalSummary.summaries[0].historical_found = {
       available: true,
@@ -368,13 +497,10 @@ describe("sesión y vistas de presentación", () => {
     expect(screen.getByText("Filas manuales relevadas").parentElement).toHaveTextContent("763");
     expect(screen.getByText("Cobertura de relevamiento").parentElement).toHaveTextContent("91,82 %");
     expect(screen.queryByText("Contabilizados")).not.toBeInTheDocument();
-
-    const panel = screen.getByRole("heading", { name: "Evidencia histórica de relevamiento" }).closest("section")!;
-    expect(within(panel).getByText("Vinculados a BG").closest(".metric")).toHaveTextContent("3");
-    expect(within(panel).getByText("Evidencia manual ambigua").closest(".metric")).toHaveTextContent("1");
-    expect(within(panel).getByText("Evidencia manual sin vínculo").closest(".metric")).toHaveTextContent("1");
-    expect(within(panel).getByText("Unidades manuales informadas:").parentElement).toHaveTextContent("11");
-    expect(panel).toHaveTextContent("no representan activos distintos");
+    expect(screen.queryByRole("heading", { name: "Evidencia histórica de relevamiento" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Vinculados a BG")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Inconsistencias operativas" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Diferencia física o patrimonial")).not.toBeInTheDocument();
   });
 
   it("omite la evidencia histórica no disponible sin mostrar ceros", async () => {
@@ -383,31 +509,6 @@ describe("sesión y vistas de presentación", () => {
 
     expect(screen.queryByRole("heading", { name: "Evidencia histórica de relevamiento" })).not.toBeInTheDocument();
     expect(screen.queryByText("Total BG")).not.toBeInTheDocument();
-  });
-
-  it("advierte que los hallados y devueltos históricos pueden superponerse", async () => {
-    const historicalSummary = structuredClone(summary);
-    historicalSummary.summaries[0].historical_found = {
-      available: true,
-      reason: null,
-      primary_metrics: {
-        total_bg_count: 3,
-        found_in_cost_center_count: 2,
-        returned_count: 2,
-        pending_to_survey_count: 1,
-        found_coverage_percent: 66.67,
-      },
-      total_bg_row_count: 3,
-      found_evidence_row_count: 2,
-      found_reported_unit_count: 2,
-      returned_bg_row_count: 2,
-      uniquely_linked_bg_row_count: 1,
-      ambiguous_link_row_count: 0,
-      unlinked_found_row_count: 1,
-    };
-    installFetch(viewer, { summaries: historicalSummary }); render(<App />);
-
-    expect(await screen.findByText("los hallados y los devueltos pueden superponerse históricamente; los pendientes se calculan solo como Total BG menos filas manuales relevadas.")).toBeInTheDocument();
   });
 
   it("muestra métricas físicas no disponibles cuando el servidor informa conteos históricos inconsistentes", async () => {
@@ -426,9 +527,9 @@ describe("sesión y vistas de presentación", () => {
 
     expect(await screen.findByRole("img", { name: "Barras agrupadas de conciliación por producto" })).toBeInTheDocument();
     expect(screen.queryByText("Active")).not.toBeInTheDocument();
-    expect(screen.getByText("Casos pendientes de revisión")).toBeInTheDocument();
-    const omissionCard = screen.getByText("No figuran en el sistema de gestión para este CC").closest(".metric");
-    expect(omissionCard).toHaveTextContent("2");
+    expect(screen.queryByRole("heading", { name: "Inconsistencias operativas" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Casos pendientes de revisión")).not.toBeInTheDocument();
+    expect(screen.queryByText("No figuran en el sistema de gestión para este CC")).not.toBeInTheDocument();
     expect(screen.queryByText("Casos de auditoría sin resolver")).not.toBeInTheDocument();
     expect(screen.queryByText("Omisiones de calidad del sistema")).not.toBeInTheDocument();
 
