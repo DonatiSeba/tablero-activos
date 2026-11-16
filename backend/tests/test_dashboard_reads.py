@@ -361,6 +361,98 @@ def test_dashboard_reports_historical_found_evidence_without_deriving_current_st
     assert summary["metrics"]["pending_not_accounted_count"] == 1
 
 
+def test_dashboard_historical_found_metrics_exclude_hand_tools_evidence(database: sessionmaker[Session]) -> None:
+    populate(database)
+    with database() as db:
+        center = db.scalar(select(CostCenter).where(CostCenter.code == "190"))
+        assert center is not None
+        audit = _batch(
+            db,
+            center,
+            ImportSource.AUDIT,
+            date(2026, 7, 1),
+            100,
+            {"historical_found": {"available": True, "total_bg_row_count": 5, "returned_bg_row_count": 1}},
+        )
+        contributing_observations = [
+            AssetObservation(
+                import_batch_id=audit.id,
+                source=ImportSource.AUDIT,
+                event=ObservationEvent.SNAPSHOT,
+                observed_on=audit.report_date,
+                cost_center_id=center.id,
+                original_data={"source_sheet": "Found assets"},
+                quantity=Decimal(quantity),
+            )
+            for quantity in ("2", "3")
+        ]
+        excluded_observation = AssetObservation(
+            import_batch_id=audit.id,
+            source=ImportSource.AUDIT,
+            event=ObservationEvent.SNAPSHOT,
+            observed_on=audit.report_date,
+            cost_center_id=center.id,
+            original_data={"source_sheet": "Herramientas de mano"},
+            quantity=Decimal("99"),
+        )
+        bg_observations = [
+            AssetObservation(
+                import_batch_id=audit.id,
+                source=ImportSource.AUDIT,
+                event=ObservationEvent.SNAPSHOT,
+                observed_on=audit.report_date,
+                cost_center_id=center.id,
+                original_data={"cells": []},
+                quantity=Decimal("1"),
+            )
+            for _ in range(5)
+        ]
+        db.add_all((*contributing_observations, excluded_observation, *bg_observations))
+        db.flush()
+        db.add_all(
+            HistoricalFoundEvidenceProjection(
+                import_batch_id=audit.id,
+                manual_observation_id=observation.id,
+                bg_observation_id=bg_observations[index].id,
+                link_strategy=HistoricalFoundLinkStrategy.EXACT_BG_CODE,
+            )
+            for index, observation in enumerate(contributing_observations)
+        )
+        db.flush()
+        evidence_manual_observation_ids = set(
+            db.scalars(
+                select(HistoricalFoundEvidenceProjection.manual_observation_id).where(
+                    HistoricalFoundEvidenceProjection.import_batch_id == audit.id,
+                )
+            )
+        )
+        assert excluded_observation.id not in evidence_manual_observation_ids
+        db.commit()
+
+    async def exercise() -> httpx.Response:
+        api = await client()
+        try:
+            assert (await api.post("/api/auth/login", json={"username": "viewer", "password": "password"})).status_code == 200
+            return await api.get("/api/dashboard/summaries?cost_center_code=190")
+        finally:
+            await api.aclose()
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 200
+    historical_found = response.json()["summaries"][0]["historical_found"]
+    assert historical_found["primary_metrics"] == {
+        "total_bg_count": 5,
+        "found_in_cost_center_count": 2,
+        "returned_count": 1,
+        "pending_to_survey_count": 3,
+        "found_coverage_percent": 40.0,
+    }
+    assert historical_found["total_bg_row_count"] == 5
+    assert historical_found["found_evidence_row_count"] == 2
+    assert historical_found["found_reported_unit_count"] == 5
+    assert historical_found["returned_bg_row_count"] == 1
+
+
 def test_dashboard_marks_inconsistent_historical_counts_unavailable(database: sessionmaker[Session]) -> None:
     populate(database)
     with database() as db:

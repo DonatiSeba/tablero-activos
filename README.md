@@ -127,13 +127,24 @@ curl -X POST http://localhost:8080/api/imports/system \
 from the workbook. The selected code is trimmed, and unknown or inactive centers
 are rejected before evidence is stored.
 
-Only physical-audit sheets are imported. Row 3 must contain each exact A:K
+Only physical-audit sheets are imported. A mixed physical-audit workbook must
+have five recognized manual source layouts. Row 3 must contain each exact A:K
 header once: `CANTIDAD`, `IDENTIFICACION`, `MAQUINA/EQUIPO`, `MARCA`, `MODELO `,
 `FUNCIONAMIENTO`, `ESTADO EXTERNO`, `OBSERVACIONES`, `EXISTENCIA EN BRIDGE`,
 `CC FISICO`, and `CC  BG`. Other embedded Bridge/system sheets are reference
-only. Every nonblank row retains its sheet name, source row, ordered cells, and
-positive integer quantity exactly as evidence. Notes and source values are not
-included in errors, audit logs, or the response.
+only. The normalized `Herramientas de mano` sheet is inspected for layout but
+deliberately excluded from manual observations, reconciliation cases,
+historical-found evidence, and physical Found/Pending KPIs because it lacks
+unique system-backed asset identification. The other four recognized layouts
+contribute those audit-derived records and metrics. Every nonblank contributing
+imported row retains its sheet name, source row, ordered cells, and positive
+integer quantity exactly as evidence. Notes and source values are not included
+in errors, audit logs, or the response.
+
+Existing batches are immutable. The dashboard automatically selects the
+completed audit batch with the newest report date, breaking ties by UUID. To
+correct an audit, upload a new distinct workbook with a later report date so it
+takes effect predictably; existing evidence is never altered.
 
 Each imported row creates exactly one derived reconciliation case, regardless of
 quantity. A nonblank `IDENTIFICACION` matches an existing asset by exact

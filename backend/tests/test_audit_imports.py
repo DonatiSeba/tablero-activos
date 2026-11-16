@@ -246,14 +246,14 @@ def mixed_workbook_bytes(
     return output.getvalue()
 
 
-def test_mixed_audit_parser_requires_five_layout_sheets_and_ignores_filled_blank_manual_rows() -> None:
+def test_mixed_audit_parser_excludes_normalization_equivalent_hand_tools_source() -> None:
     workbook = Workbook()
     workbook.remove(workbook.active)
     for sheet_name in BG_PAGE_HEADERS:
         sheet = workbook.create_sheet(sheet_name)
         sheet.append(list(BG_PAGE_HEADERS[sheet_name]))
         sheet.append(["r", "c", "p", sheet_name, "id", 1, "d", "active"])
-    for number in range(5):
+    for number in range(4):
         sheet = workbook.create_sheet(f"Manual {number}")
         sheet.append(["Physical audit"])
         sheet.append([])
@@ -261,6 +261,12 @@ def test_mixed_audit_parser_requires_five_layout_sheets_and_ignores_filled_blank
         sheet.append([None] * 11)
         for cell in sheet[4]:
             cell.fill = BG_RETURN_FILL
+    excluded_sheet_name = "  ｈＥＲＲＡＭＩＥＮＴＡＳ\u00a0DE   mANO  "
+    hand_tools = workbook.create_sheet(excluded_sheet_name)
+    hand_tools.append(["Physical audit"])
+    hand_tools.append([])
+    hand_tools.append(list(AUDIT_HEADERS))
+    hand_tools.append([1, "HAND-TOOLS-01"] + [None] * 9)
     output = BytesIO()
     workbook.save(output)
 
@@ -270,18 +276,26 @@ def test_mixed_audit_parser_requires_five_layout_sheets_and_ignores_filled_blank
     assert report.bg_row_count == 2
     assert report.manual_row_count == 0
     assert len(report.rows) == 2
+    assert excluded_sheet_name not in report.sheet_names
+    assert all(row.source_kind == "bg" for row in report.rows)
+    assert all(row.original_data["source_sheet"] != excluded_sheet_name for row in report.rows)
 
+    bg_rows = {
+        "Activos en sistema BG Pag. 1": [(["r", "c", "p", "one", "id", 1, "d", "active"], False)],
+        "Activos en sistema BG Pag. 2": [(["r", "c", "p", "two", "id", 1, "d", "active"], False)],
+    }
     with pytest.raises(ImportValidationError) as invalid:
+        parse_audit_report(mixed_workbook_bytes(bg_rows, {"Only manual": [[1, "one"] + [None] * 9]}))
+    assert invalid.value.code == "invalid_mixed_audit_profile"
+
+    with pytest.raises(ImportValidationError) as missing_excluded_source:
         parse_audit_report(
             mixed_workbook_bytes(
-                {
-                    "Activos en sistema BG Pag. 1": [(["r", "c", "p", "one", "id", 1, "d", "active"], False)],
-                    "Activos en sistema BG Pag. 2": [(["r", "c", "p", "two", "id", 1, "d", "active"], False)],
-                },
-                {"Only manual": [[1, "one"] + [None] * 9]},
+                bg_rows,
+                {f"Manual {number}": [[1, f"manual-{number}"] + [None] * 9] for number in range(5)},
             )
         )
-    assert invalid.value.code == "invalid_mixed_audit_profile"
+    assert missing_excluded_source.value.code == "invalid_mixed_audit_profile"
 
 
 def test_audit_parser_skips_fully_blank_tail_rows() -> None:
@@ -470,7 +484,7 @@ def test_mixed_audit_import_persists_historical_found_links_without_changing_bg_
             "Manual whitespace": [[3, " SPACE CODE "] + [None] * 9],
             "Manual serial": [[4, "NS 123456"] + [None] * 9, [4, "NS 1234"] + [None] * 9],
             "Manual ambiguous": [[1, "DUP"] + [None] * 9],
-            "Manual unlinked": [[1, "NOT PRESENT"] + [None] * 9],
+            "Herramientas de mano": [[1, "NOT PRESENT"] + [None] * 9],
         },
     )
     workbook = load_workbook(BytesIO(content))
@@ -502,7 +516,7 @@ def test_mixed_audit_import_persists_historical_found_links_without_changing_bg_
         links = list(db.scalars(select(HistoricalFoundEvidenceProjection).order_by(HistoricalFoundEvidenceProjection.created_at)))
         assert batch is not None
         assert batch.metadata_json == {"historical_found": response.json()["historical_found"]}
-        assert len(links) == 6
+        assert len(links) == 5
         assert {link.link_strategy for link in links} == {
             HistoricalFoundLinkStrategy.EXACT_BG_CODE,
             HistoricalFoundLinkStrategy.WHITESPACE_NORMALIZED_BG_CODE,
@@ -514,11 +528,20 @@ def test_mixed_audit_import_persists_historical_found_links_without_changing_bg_
             HistoricalFoundLinkReason.NO_BG_CANDIDATE,
         }
         assert sum(link.bg_observation_id is not None for link in links) == 3
+        observations = list(db.scalars(select(AssetObservation).where(AssetObservation.import_batch_id == batch.id)))
+        cases = list(db.scalars(select(ReconciliationCase)))
+        assert len(observations) == len(cases) == 10
+        assert {case.audit_observation_id for case in cases} == {observation.id for observation in observations}
         manual_observations = {
             observation.id: observation
-            for observation in db.scalars(select(AssetObservation).where(AssetObservation.import_batch_id == batch.id))
-            if observation.original_data["source_sheet"].startswith("Manual")
+            for observation in observations
+            if not observation.original_data["source_sheet"].startswith("Activos en sistema BG")
         }
+        assert len(manual_observations) == 5
+        assert all(
+            observation.original_data["source_sheet"] != "Herramientas de mano"
+            for observation in manual_observations.values()
+        )
         links_by_manual_location = {
             (
                 manual_observations[link.manual_observation_id].original_data["source_sheet"],

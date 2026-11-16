@@ -48,6 +48,7 @@ BG_AUDIT_SHEETS = tuple(BG_AUDIT_HEADERS)
 BG_IDENTIFIER_COLUMN = 4
 BG_DIRECT_FILL_SIGNATURE_KEY = "bg_direct_fill_signature"
 MANUAL_DIRECT_FILL_SIGNATURE_KEY = "manual_direct_fill_signature"
+EXCLUDED_MANUAL_SHEET_NORMALIZED_NAME = normalize_asset_code("Herramientas de mano")
 BG_RETURN_FILL_SIGNATURE = {
     "fill_type": "solid",
     "foreground": {"type": "theme", "theme": 7, "tint": 0.5999938962981048},
@@ -186,8 +187,13 @@ def _parse_bg_audit_report(workbook: Any) -> ParsedAuditReport:
     return ParsedAuditReport(rows=tuple(rows), sheet_names=BG_AUDIT_SHEETS, bg_row_count=len(rows))
 
 
-def _parse_manual_audit_sheet(worksheet: Any) -> tuple[ParsedAuditRow, ...] | None:
-    """Parse one row-three A:K physical sheet without using its display name."""
+def _is_excluded_manual_sheet(worksheet: Any) -> bool:
+    """Exclude only the named hand-tools source, never its row content."""
+    return normalize_asset_code(worksheet.title) == EXCLUDED_MANUAL_SHEET_NORMALIZED_NAME
+
+
+def _manual_audit_sheet_headers(worksheet: Any) -> tuple[tuple[Any, ...], dict[str, int]] | None:
+    """Validate a row-three A:K physical sheet before deciding whether it contributes."""
     header_cells = tuple(next(worksheet.iter_rows(min_row=3, max_row=3), ()) or ())
     header_values = tuple(cell.value for cell in header_cells)
     headers = tuple("" if value is None else str(value) for value in header_values)
@@ -202,7 +208,17 @@ def _parse_manual_audit_sheet(worksheet: Any) -> tuple[ParsedAuditRow, ...] | No
             "invalid_audit_layout",
             "each audit sheet must contain the required physical-audit headers exactly once in A:K on row 3",
         )
-    indexes = {header: headers.index(header) for header in AUDIT_HEADERS}
+    return header_values, {header: headers.index(header) for header in AUDIT_HEADERS}
+
+
+def _parse_manual_audit_sheet(
+    worksheet: Any, headers: tuple[tuple[Any, ...], dict[str, int]] | None = None
+) -> tuple[ParsedAuditRow, ...] | None:
+    """Parse one validated row-three A:K physical sheet without using its display name."""
+    headers = headers or _manual_audit_sheet_headers(worksheet)
+    if headers is None:
+        return None
+    header_values, indexes = headers
     rows: list[ParsedAuditRow] = []
     for source_row, source_cells in enumerate(worksheet.iter_rows(min_row=4), start=4):
         values = tuple(cell.value for cell in source_cells)
@@ -249,25 +265,29 @@ def parse_audit_report(content: bytes) -> ParsedAuditReport:
         if has_bg_profile:
             bg_report = _parse_bg_audit_report(workbook)
             manual_sheets: list[str] = []
+            contributing_manual_sheets: list[str] = []
             manual_rows: list[ParsedAuditRow] = []
             for worksheet in workbook.worksheets:
                 if worksheet.title in BG_AUDIT_SHEETS:
                     continue
-                parsed_rows = _parse_manual_audit_sheet(worksheet)
-                if parsed_rows is None:
+                headers = _manual_audit_sheet_headers(worksheet)
+                if headers is None:
                     continue
                 manual_sheets.append(worksheet.title)
-                manual_rows.extend(parsed_rows)
+                if _is_excluded_manual_sheet(worksheet):
+                    continue
+                contributing_manual_sheets.append(worksheet.title)
+                manual_rows.extend(_parse_manual_audit_sheet(worksheet, headers) or ())
             if not manual_sheets:
                 return bg_report
-            if len(manual_sheets) != 5:
+            if len(manual_sheets) != 5 or len(contributing_manual_sheets) != 4:
                 raise ImportValidationError(
                     "invalid_mixed_audit_profile",
-                    "mixed BG audit imports require exactly five physical-audit sheets using the A:K row-three layout",
+                    "mixed BG audit imports require five physical-audit sheets with four contributing manual sources",
                 )
             return ParsedAuditReport(
                 rows=(*bg_report.rows, *manual_rows),
-                sheet_names=(*BG_AUDIT_SHEETS, *manual_sheets),
+                sheet_names=(*BG_AUDIT_SHEETS, *contributing_manual_sheets),
                 bg_row_count=bg_report.bg_row_count,
                 manual_row_count=len(manual_rows),
                 is_mixed_audit=True,
