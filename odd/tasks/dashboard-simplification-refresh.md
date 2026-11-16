@@ -44,7 +44,8 @@ Simplify the dashboard by removing the historical-evidence and operational-issue
   - Verification: independent final verification observed full frontend tests pass (44), the TypeScript/Vite production build pass, and scoped `git diff --check` pass. Vite reports its existing non-blocking 500 kB chunk-size advisory.
 - [x] DSR-03a Correct the newly added frontend test fixture types and rerun complete verification.
   - Outcome: widened the test-only mock fixture's `rubro` field to `string | null`, allowing refreshed and stale test values without changing runtime behavior.
-- [ ] DSR-04 Request explicit commit authorization after verified implementation.
+- [x] DSR-04 Request explicit commit authorization after verified implementation.
+  - Outcome: user authorized commit; implementation committed as `532a39c` (`fix: simplify dashboard refresh`).
 
 ## Progress
 - 2026-11-16: User authorized simplification and refresh correction. Read-only exploration confirmed stored historical evidence is present; the stale display is a client lifecycle issue rather than missing audit data.
@@ -52,3 +53,4 @@ Simplify the dashboard by removing the historical-evidence and operational-issue
 - 2026-11-16: DSR-02 completed and independently verified. A first implementation reset paginated summaries on refresh; it was corrected and covered so the active page and selected center remain visible.
 - 2026-11-16: DSR-03 verification found a build-blocking TypeScript error in three newly added test fixture fields. Full frontend tests passed (44); whitespace checks passed; no build artifact was produced.
 - 2026-11-16: DSR-03a corrected the test-only fixture type. Independent final verification passed all frontend tests (44), TypeScript/Vite production build, and scoped whitespace validation.
+- 2026-11-16: User authorized and created the implementation work-unit commit `532a39c` (`fix: simplify dashboard refresh`). Native review inspect reported RDD disabled; delegated writer and independent verifier evidence are recorded above.
