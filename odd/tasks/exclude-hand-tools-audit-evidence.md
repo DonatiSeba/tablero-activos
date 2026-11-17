@@ -47,7 +47,8 @@ Exclude the `Herramientas de mano` manual audit sheet from historical found evid
   - Verification: independent final verification observed 33 focused tests, 129 full backend tests, and scoped whitespace validation pass. Existing FastAPI/Starlette deprecation and Git LF-to-CRLF warnings remain non-blocking.
 - [x] HTE-04a Add normalized excluded-sheet-title regression, then rerun verification.
   - Outcome: the regression uses full-width compatibility characters plus case/whitespace variation, so it fails if NFKC sheet-title normalization is removed.
-- [ ] HTE-05 Request explicit commit authorization after verified implementation.
+- [x] HTE-05 Request explicit commit authorization after verified implementation.
+  - Outcome: user authorized commit; implementation committed as `86578b4` (`fix: exclude hand tools from audit evidence`).
 
 ## Progress
 - 2026-11-16: User confirmed a five-sheet workbook is accepted, but `Herramientas de mano` is ignored and exactly four remaining manual sheets contribute physical found evidence.
@@ -57,3 +58,4 @@ Exclude the `Herramientas de mano` manual audit sheet from historical found evid
 - 2026-11-16: HTE-04 ran successfully (33 focused and 129 full backend tests), but independent verification identified a missing regression for normalized non-canonical excluded-sheet titles.
 - 2026-11-16: HTE-04a added case/whitespace normalization coverage; independent re-verification found it does not isolate NFKC normalization, so a full-width compatibility-character case remains required.
 - 2026-11-16: HTE-04a was corrected with full-width compatibility characters. Independent final verification confirms the NFKC contract and five-recognized/four-contributing behavior; all focused and full backend checks pass.
+- 2026-11-16: User authorized and created implementation work-unit commit `86578b4` (`fix: exclude hand tools from audit evidence`). Native review inspect reported RDD disabled; delegated writer and independent verifier evidence are recorded above.
